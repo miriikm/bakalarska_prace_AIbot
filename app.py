@@ -11,8 +11,9 @@ from pydantic import SecretStr
 import streamlit_authenticator as stauth
 
 from langchain_community.document_loaders import RecursiveUrlLoader, DirectoryLoader
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 
@@ -20,6 +21,7 @@ from langchain_community.vectorstores import FAISS
 _SCRIPT_DIR = Path(__file__).resolve().parent
 DOCS_DIR = _SCRIPT_DIR / "docs"
 DOCS_DIR.mkdir(exist_ok=True)
+FAISS_INDEX_STATIC = _SCRIPT_DIR / "faiss_index_static"
 FAISS_INDEX_DIR = _SCRIPT_DIR / "faiss_index_local"
 HISTORY_FILE = _SCRIPT_DIR / "history.json"
 CONFIG_FILE = _SCRIPT_DIR / "config.yaml"
@@ -454,22 +456,40 @@ def create_llm_instance(provider: str, api_key: str):
         return None
     try:
         if provider == "Google Gemini":
+            err1 = None
             try:
                 llm = ChatGoogleGenerativeAI(
-                    model="gemini-2.5-flash",
+                    model="gemini-1.5-flash",
                     google_api_key=api_key,
                     convert_system_message_to_human=True,
                     streaming=True,
+                    client_options={"api_version": "v1"},
                 )
-            except Exception:
-                llm = ChatGoogleGenerativeAI(
-                    model="gemini-pro",
-                    google_api_key=api_key,
-                    convert_system_message_to_human=True,
-                    streaming=True,
-                )
-            print(f"DEBUG: Používám model {getattr(llm, 'model', '?')}")
-            return llm
+                return llm
+            except Exception as e1:
+                err1 = e1
+                try:
+                    llm = ChatGoogleGenerativeAI(
+                        model="models/gemini-1.5-flash",
+                        google_api_key=api_key,
+                        convert_system_message_to_human=True,
+                        streaming=True,
+                        client_options={"api_version": "v1"},
+                    )
+                    return llm
+                except Exception as e2:
+                    try:
+                        llm = ChatGoogleGenerativeAI(
+                            model="gemini-1.5-pro",
+                            google_api_key=api_key,
+                            convert_system_message_to_human=True,
+                            streaming=True,
+                            client_options={"api_version": "v1"},
+                        )
+                        return llm
+                    except Exception as e3:
+                        st.error(f"Gemini 1.5-flash: {err1}\n\nmodels/gemini-1.5-flash: {e2}\n\ngemini-1.5-pro: {e3}")
+                        return None
         elif provider == "OpenAI (ChatGPT)":
             return ChatOpenAI(model="gpt-4o-mini", api_key=SecretStr(api_key), temperature=0.7)
         else:
@@ -479,137 +499,42 @@ def create_llm_instance(provider: str, api_key: str):
         return None
 
 def generate_conversation_title(first_question: str, api_key: str, provider: str = "Google Gemini") -> str:
-    """Vygeneruje krátký název (3-4 slova) pro konverzaci pomocí vybraného LLM."""
-    try:
-        # Validace API klíče
-        if not api_key or api_key is None or (isinstance(api_key, str) and api_key.strip() == ""):
-            return f"Konverzace {datetime.now().strftime('%d.%m')}"
-        
-        # Vytvoření LLM instance
-        llm = create_llm_instance(provider, api_key)
-        if llm is None:
-            return f"Konverzace {datetime.now().strftime('%d.%m')}"
-        
-        prompt = f"Vytvoř velmi krátký název (přesně 3-4 slova) pro tuto konverzaci založenou na této otázce: {first_question}\n\nNázev (pouze 3-4 slova, bez uvozovek):"
-        response = llm.invoke(prompt)
-        
-        # Ošetření odpovědi - zkontrolujeme, zda response a response.content existují
-        if response and hasattr(response, 'content') and response.content:
-            content = str(response.content) if response.content else ""
-        else:
-            return f"Konverzace {datetime.now().strftime('%d.%m')}"
-        
-        if isinstance(content, list):
-            content = str(content[0]) if content and len(content) > 0 else ""
-        
-        title = str(content).strip().strip('"').strip("'")
-        # Omezíme na 4 slova
-        words = title.split()[:4]
-        return " ".join(words) if words else "Nová konverzace"
-    except Exception as e:
-        return f"Konverzace {datetime.now().strftime('%d.%m')}"
+    words = first_question.strip().split()[:5]
+    return " ".join(words) if words else f"Konverzace {datetime.now().strftime('%d.%m')}"
 
-PROMPT_TEMPLATE = """
-Jsi přátelský a vysoce odborný asistent pro RAD-seq analýzy.
+PROMPT_TEMPLATE = """Jsi expert na Speciation Genomics. Odpovídáš na základě oficiálního manuálu ze speciationgenomics.github.io.
 
-Pokud je dotaz odborný, použij poskytnutý KONTEXT z manuálů. Pokud v KONTEXTU odpověď není, využij své všeobecné znalosti, ale upozorni uživatele, že tato informace pochází z tvých obecných znalostí a ne z nahraných manuálů.
-
-**Formátování odpovědi (vždy používej Markdown):**
-- **Důležité termíny a koncepty** označuj tučně (např. **RAD-seq**, **VCF soubor**)
-- Bash příkazy vždy v blocích kódu:
-  ```bash
-  příkaz --parametr hodnota
-  ```
-- Používej odrážky (-) a číslované seznamy (1., 2., ...) pro přehlednost
-- Strukturované sekce s nadpisy (## nebo ###)
-- Pokud generuješ více příkazů, seskupte je logicky do sekcí
-
-**Příklad struktury odpovědi:**
-## Název řešení
-
-**Klíčový koncept:** Vysvětlení...
-
-### Postup:
-1. První krok
-2. Druhý krok
-
-### Bash příkazy:
-```bash
-příkaz1
-příkaz2
-```
-
-KONTEXT z manuálů:
+KONTEXT Z MANUÁLU:
 {context}
 
-Dotaz uživatele:
-{question}
-"""
+Pokud v tomto manuálu odpověď není, upozorni na to uživatele.
 
-PROMPT_TEMPLATE_NO_CONTEXT = """
-Jsi přátelský a vysoce odborný asistent pro RAD-seq analýzy.
+Otázka: {question}"""
 
-Pokud ti uživatel posílá běžný pozdrav nebo neformální zprávu, odpověz mu lidsky a přátelsky. Nabídni pomoc s bioinformatikou a RAD-seq analýzami.
+PROMPT_TEMPLATE_NO_CONTEXT = """Jsi expert na Speciation Genomics. Odpovídáš na základě oficiálního manuálu ze speciationgenomics.github.io. Nemáš k dispozici kontext z manuálu. Pokud v tomto manuálu odpověď není, upozorni na to uživatele.
 
-Pokud je dotaz technický, ale nemám k dispozici kontext z manuálů, odpověz na základě svých obecných znalostí, ale upozorni uživatele na to.
-
-**Formátování odpovědi (vždy používej Markdown):**
-- **Důležité termíny** označuj tučně
-- Bash příkazy v blocích kódu: ```bash ... ```
-- Používej odrážky a číslované seznamy pro přehlednost
-- Strukturované sekce s nadpisy
-
-Dotaz uživatele:
-{question}
-"""
+Dotaz: {question}"""
 
 def classify_user_intent(prompt: str, api_key: str, provider: str = "Google Gemini") -> str:
-    """Rozhodne, zda je dotaz pozdrav/neformální nebo technický dotaz vyžadující RAG."""
-    if not api_key or api_key is None or (isinstance(api_key, str) and api_key.strip() == ""):
-        return "technical"  # Default na technický, pokud není API klíč
-    
-    # Jednoduchá kontrola klíčových slov pro pozdravy
-    greeting_keywords = ["ahoj", "čau", "dobrý den", "dobrý večer", "děkuji", "děkuju", "díky", 
+    greeting_keywords = ["ahoj", "čau", "dobrý den", "dobrý večer", "děkuji", "děkuju", "díky",
                          "co umíš", "co dokážeš", "pomoc", "help", "hello", "hi", "thanks", "thank you"]
     prompt_lower = str(prompt).lower().strip()
-    
-    # Pokud je dotaz velmi krátký a obsahuje pozdrav, pravděpodobně jde o pozdrav
     if len(prompt_lower.split()) <= 5:
         for keyword in greeting_keywords:
             if keyword in prompt_lower:
                 return "greeting"
-    
-    # Pokud začíná pozdravem, ale pokračuje technickým dotazem, použijeme RAG
-    # Použijeme LLM pro přesnější klasifikaci
-    try:
-        llm = create_llm_instance(provider, api_key)
-        if llm is None:
-            return "technical"
-        
-        classification_prompt = f"""Rozhodni, zda je tento dotaz:
-1. POZDRAV/NEformální zpráva (např. "Ahoj", "Děkuji", "Co umíš?") - odpověz "greeting"
-2. TECHNICKÝ dotaz týkající se bioinformatiky/RAD-seq (např. "Jak filtrovat VCF?", "Demultiplexing") - odpověz "technical"
-
-Dotaz: "{prompt}"
-
-Odpověz pouze jedním slovem: "greeting" nebo "technical":"""
-        
-        response = llm.invoke(classification_prompt)
-        if response and hasattr(response, 'content') and response.content:
-            result = str(response.content).strip().lower()
-            if "greeting" in result:
-                return "greeting"
-    except Exception:
-        pass  # Pokud selže klasifikace, použijeme RAG jako default
-    
     return "technical"
+
+def _get_local_embeddings():
+    try:
+        return HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    except Exception:
+        return None
 
 def _get_embeddings(api_key: str, provider: str):
     if not api_key or not api_key.strip():
         return None
     try:
-        if provider == "Google Gemini":
-            return GoogleGenerativeAIEmbeddings(api_key=SecretStr(api_key), model="models/embedding-001")
         if provider == "OpenAI (ChatGPT)":
             return OpenAIEmbeddings(api_key=SecretStr(api_key), model="text-embedding-3-small")
     except Exception:
@@ -633,23 +558,25 @@ def _stream_or_invoke(llm, prompt: str) -> tuple[str, bool]:
 
 @st.cache_resource(show_spinner=False)
 def get_vectorstore_for_query(_api_key: str, _provider: str):
-    if not FAISS_INDEX_DIR.exists():
-        return None
-    embeddings = _get_embeddings(_api_key, _provider)
+    embeddings = _get_local_embeddings()
     if embeddings is None:
         return None
-    try:
-        return FAISS.load_local(str(FAISS_INDEX_DIR), embeddings, allow_dangerous_deserialization=True)
-    except Exception:
-        return None
+    for index_dir in (FAISS_INDEX_STATIC, FAISS_INDEX_DIR):
+        if not index_dir.exists() or not (index_dir / "index.faiss").exists():
+            continue
+        try:
+            return FAISS.load_local(str(index_dir), embeddings, allow_dangerous_deserialization=True)
+        except Exception:
+            continue
+    return None
 
 @st.cache_resource(show_spinner=True)
 def build_vectorstore(_api_key: str, _provider: str):
-    embeddings = _get_embeddings(_api_key, _provider)
+    embeddings = _get_local_embeddings()
     if embeddings is None:
         return None
-    index_path = str(FAISS_INDEX_DIR)
-    if FAISS_INDEX_DIR.exists():
+    index_path = str(FAISS_INDEX_STATIC)
+    if FAISS_INDEX_STATIC.exists() and (FAISS_INDEX_STATIC / "index.faiss").exists():
         try:
             return FAISS.load_local(index_path, embeddings, allow_dangerous_deserialization=True)
         except Exception:
@@ -1117,14 +1044,11 @@ def main():
         # Pokud je to první zpráva v konverzaci, vytvoříme novou konverzaci a vygenerujeme název
         is_new_conversation = st.session_state["current_conversation_id"] is None
         if is_new_conversation:
-            # Generování unikátního ID pomocí secrets.token_hex(4)
             st.session_state["current_conversation_id"] = secrets.token_hex(4)
-            with st.spinner("Vytvářím název konverzace..."):
-                try:
-                    title = generate_conversation_title(prompt, api_key, ai_provider)
-                    st.session_state["conversation_title"] = title
-                except Exception as e:
-                    st.session_state["conversation_title"] = f"Konverzace {datetime.now().strftime('%d.%m')}"
+            try:
+                st.session_state["conversation_title"] = generate_conversation_title(prompt, api_key, ai_provider)
+            except Exception:
+                st.session_state["conversation_title"] = f"Konverzace {datetime.now().strftime('%d.%m')}"
         
         # Generování odpovědi
         with st.chat_message("assistant"):
@@ -1175,7 +1099,6 @@ def main():
                                 general_knowledge_fallback = True
                             if general_knowledge_fallback or not context_text or not str(context_text).strip():
                                 full_prompt = PROMPT_TEMPLATE_NO_CONTEXT.format(question=prompt)
-                                st.warning("Nepodařilo se prohledat lokální manuály, odpovídám z obecných znalostí.")
                             else:
                                 full_prompt = PROMPT_TEMPLATE.format(context=context_text, question=prompt)
 
@@ -1210,7 +1133,7 @@ def main():
                             st.write(f"- {source}")
 
             except Exception as e:
-                st.error(f"Došlo k chybě: {e}")
+                st.error(f"Chyba modelu: {type(e).__name__}: {e}")
                 if st.session_state["messages"]:  # Zkontrolujeme, zda existuje zpráva k odstranění
                     st.session_state["messages"].pop()  # Odstraníme chybnou zprávu
 
