@@ -13,9 +13,12 @@ import streamlit_authenticator as stauth
 from langchain_community.document_loaders import RecursiveUrlLoader, DirectoryLoader
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_google_genai import ChatGoogleGenerativeAI
+import google.generativeai as genai
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
+
+os.environ["GOOGLE_API_VERSION"] = "v1"
 
 # --- KONFIGURACE ---
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -48,10 +51,10 @@ def _get_default_gemini_api_key() -> str:
 def _resolve_api_key(provider: str, user_key: str) -> tuple[str, bool]:
     global_key = _get_global_api_key(provider)
     user_val = (user_key or "").strip()
-    if global_key:
-        return global_key, True
     if user_val:
         return user_val, False
+    if global_key:
+        return global_key, True
     if provider == "Google Gemini":
         effective = _get_default_gemini_api_key()
         return effective, bool(effective)
@@ -451,24 +454,45 @@ def show_profile_management(config: dict, username: str):
                 except Exception as err:
                     st.error(f"Chyba při ověřování hesla: {err}")
 
+GEMINI_SAFETY_SETTINGS = {
+    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+}
+
+def get_gemini_model(api_key: str):
+    key = (api_key or "").strip() or os.environ.get("GOOGLE_API_KEY", "")
+    if not key:
+        return None
+    try:
+        genai.configure(api_key=key)  # type: ignore[attr-defined]
+        for model_name in ("models/gemini-2.5-flash", "models/gemini-1.5-flash", "gemini-1.5-flash"):
+            try:
+                return genai.GenerativeModel(model_name=model_name)  # type: ignore[attr-defined]
+            except Exception:
+                continue
+        return None
+    except Exception:
+        return None
+
+def get_gemini_response(model, full_prompt: str) -> str:
+    try:
+        response = model.generate_content(full_prompt, safety_settings=GEMINI_SAFETY_SETTINGS)
+        if response and hasattr(response, "text") and response.text:
+            return response.text.strip()
+        return "Model vrátil prázdnou odpověď."
+    except Exception as e:
+        st.error(f"Technická chyba API: {str(e)}")
+        return ""
+
 def create_llm_instance(provider: str, api_key: str):
     if not api_key or api_key is None or (isinstance(api_key, str) and api_key.strip() == ""):
         return None
     try:
-        if provider == "Google Gemini":
-            llm = ChatGoogleGenerativeAI(
-                model="gemini-1.5-flash",
-                google_api_key=api_key,
-                temperature=0,
-                max_output_tokens=None,
-                timeout=None,
-                max_retries=2,
-            )
-            return llm
-        elif provider == "OpenAI (ChatGPT)":
+        if provider == "OpenAI (ChatGPT)":
             return ChatOpenAI(model="gpt-4o-mini", api_key=SecretStr(api_key), temperature=0.7)
-        else:
-            return None
+        return None
     except Exception as e:
         st.error(f"Chyba při inicializaci {provider}: {e}")
         return None
@@ -486,9 +510,7 @@ Pokud v tomto manuálu odpověď není, upozorni na to uživatele.
 
 Otázka: {question}"""
 
-PROMPT_TEMPLATE_NO_CONTEXT = """Jsi expert na Speciation Genomics. Odpovídáš na základě oficiálního manuálu ze speciationgenomics.github.io. Nemáš k dispozici kontext z manuálu. Pokud v tomto manuálu odpověď není, upozorni na to uživatele.
-
-Dotaz: {question}"""
+PROMPT_TEMPLATE_NO_CONTEXT = """Uživatel se ptá na: {question}. Pokud o tom v manuálu nic není, odpověz ze svých obecných znalostí o genetice, ale upozorni na to."""
 
 def classify_user_intent(prompt: str, api_key: str, provider: str = "Google Gemini") -> str:
     greeting_keywords = ["ahoj", "čau", "dobrý den", "dobrý večer", "děkuji", "děkuju", "díky",
@@ -533,6 +555,10 @@ def _stream_or_invoke(llm, prompt: str) -> tuple[str, bool]:
 
 @st.cache_resource(show_spinner=False)
 def get_vectorstore_for_query(_api_key: str, _provider: str):
+    if not FAISS_INDEX_STATIC.exists():
+        return None
+    if not (FAISS_INDEX_STATIC / "index.faiss").exists():
+        return None
     embeddings = _get_local_embeddings()
     if embeddings is None:
         return None
@@ -634,7 +660,12 @@ def main():
         current_provider = st.session_state.get("ai_provider", stored_provider)
         provider_icon = "🤖" if current_provider == "Google Gemini" else "💬"
         st.caption(f"{provider_icon} **Aktivní model:** {current_provider}")
-        
+        _uk = st.session_state.get("api_key_input", "") or stored_api_key
+        _eff, _from_secrets = _resolve_api_key(current_provider, _uk)
+        if not _eff:
+            st.caption("API klíč: nezadán")
+        else:
+            st.caption("API klíč: z Nastavení" if not _from_secrets else "API klíč: z secrets/prostředí")
         st.divider()
         
         # Tlačítko "Nová konverzace"
@@ -999,7 +1030,8 @@ def main():
     
     # Vstupní pole pro novou otázku
     if prompt := st.chat_input("Zadejte svůj dotaz (např. filtrování VCF nebo demultiplexing):"):
-        effective_key, _ = _resolve_api_key(ai_provider, st.session_state.get("api_key_input", "") or stored_api_key)
+        user_key = st.session_state.get("api_key_input", "") or stored_api_key
+        effective_key, from_secrets = _resolve_api_key(ai_provider, user_key)
         if not effective_key:
             provider_name = "Google API klíč" if ai_provider == "Google Gemini" else "OpenAI API klíč"
             st.warning(f"⚠️ Prosím, zadejte {provider_name} v sekci 'Nastavení' v sidebaru, nebo ho uložte do svého profilu.")
@@ -1028,23 +1060,32 @@ def main():
         # Generování odpovědi
         with st.chat_message("assistant"):
             try:
-                print("DEBUG: Startuji proces LLM")
                 intent = classify_user_intent(prompt, api_key, ai_provider)
-                
-                # Dynamická inicializace LLM modelu podle poskytovatele
-                llm = create_llm_instance(ai_provider, api_key)
-                if llm is None:
-                    provider_name = "Gemini" if ai_provider == "Google Gemini" else "ChatGPT"
-                    st.error(f"Chyba při inicializaci {provider_name} modelu. Zkontrolujte prosím API klíč.")
-                    st.session_state["messages"].pop()  # Odstraníme chybnou zprávu
-                    st.stop()
-                
+                gemini_model = None
+                llm = None
+                if ai_provider == "Google Gemini":
+                    gemini_model = get_gemini_model(api_key)
+                    if gemini_model is None:
+                        st.error("Chyba při inicializaci Gemini modelu. Zkontrolujte prosím API klíč.")
+                        st.session_state["messages"].pop()
+                        st.stop()
+                else:
+                    llm = create_llm_instance(ai_provider, api_key)
+                    if llm is None:
+                        st.error("Chyba při inicializaci modelu. Zkontrolujte prosím API klíč.")
+                        st.session_state["messages"].pop()
+                        st.stop()
                 relevant_docs = []
                 general_knowledge_fallback = False
+                context_text = ""
 
                 if intent == "greeting":
-                    full_prompt = PROMPT_TEMPLATE_NO_CONTEXT.format(question=prompt)
+                    full_prompt = prompt
                 else:
+                    if not FAISS_INDEX_STATIC.exists():
+                        st.error("Složka faiss_index_static nebyla v projektu nalezena!")
+                    elif not (FAISS_INDEX_STATIC / "index.faiss").exists():
+                        st.error("Složka faiss_index_static existuje, ale je prázdná. Spusť znovu create_index.py.")
                     with st.spinner("Hledám v manuálech a připravuji odpověď..."):
                         vs = None
                         try:
@@ -1053,10 +1094,11 @@ def main():
                             vs = None
                             general_knowledge_fallback = True
                         if vs is None and general_knowledge_fallback:
-                            full_prompt = PROMPT_TEMPLATE_NO_CONTEXT.format(question=prompt)
+                            full_prompt = prompt
                         elif vs is None:
-                            st.warning("Znalostní báze je prázdná, odpovídám z obecných znalostí.")
-                            full_prompt = PROMPT_TEMPLATE_NO_CONTEXT.format(question=prompt)
+                            index_path = str(FAISS_INDEX_STATIC.resolve())
+                            st.error(f"CHYBA: Index nenalezen v cestě {index_path}")
+                            full_prompt = prompt
                         else:
                             try:
                                 retriever = vs.as_retriever(search_kwargs={"k": 5})
@@ -1073,12 +1115,31 @@ def main():
                             if context_text is None or not str(context_text).strip():
                                 general_knowledge_fallback = True
                             if general_knowledge_fallback or not context_text or not str(context_text).strip():
-                                full_prompt = PROMPT_TEMPLATE_NO_CONTEXT.format(question=prompt)
+                                full_prompt = prompt
                             else:
                                 full_prompt = PROMPT_TEMPLATE.format(context=context_text, question=prompt)
 
-                with st.spinner("Hledám v manuálech a připravuji odpověď..." if intent != "greeting" else "Přemýšlím..."):
-                    response_content, streamed = _stream_or_invoke(llm, full_prompt)
+                if ai_provider == "Google Gemini":
+                    st.write(f"DEBUG: Délka nalezeného kontextu: {len(context_text)} znaků")
+                if intent != "greeting" and len(context_text) == 0:
+                    response_content = (
+                        "**Znalostní báze je prázdná.** Manuál z https://speciationgenomics.github.io/ je v projektu (složka `static_docs/`), "
+                        "ale chybí vyhledávací index. V terminálu v adresáři projektu spusť:\n\n"
+                        "1. `pip install sentence-transformers`\n"
+                        "2. `python build_faiss_from_static.py`\n\n"
+                        "Poté aplikaci obnov (F5) a zkus dotaz znovu."
+                    )
+                    streamed = False
+                else:
+                    with st.spinner("Hledám v manuálech a připravuji odpověď..." if intent != "greeting" else "Přemýšlím..."):
+                        if ai_provider == "Google Gemini" and gemini_model is not None:
+                            response_content = get_gemini_response(gemini_model, full_prompt)
+                            streamed = False
+                        elif llm is not None:
+                            response_content, streamed = _stream_or_invoke(llm, full_prompt)
+                        else:
+                            response_content = ""
+                            streamed = False
                 if not response_content:
                     st.error("Model nevrátil žádnou odpověď. Zkuste to prosím znovu.")
                     st.session_state["messages"].pop()
