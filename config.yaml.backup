@@ -4,7 +4,7 @@ credentials:
       name: Miroslava Krmelová
       email: krmelova.miroslava@gmail.com
       password: $2b$12$0sqs9gSaxmXq5SwE/qzlr.eSeLGCyvL02yjhZ0SXUdNwe4lYLynH2
-      api_key: AIzaSyCKlLMPAIFOxK9fqZgHnOL4-9vlLqVhpEs
+      api_key: AIzaSyD0JbNOM3KiGWSlgeeeSID-pZA6lHpGiSI
       ai_provider: Google Gemini
 cookie:
   expiry_days: 30

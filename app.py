@@ -456,40 +456,15 @@ def create_llm_instance(provider: str, api_key: str):
         return None
     try:
         if provider == "Google Gemini":
-            err1 = None
-            try:
-                llm = ChatGoogleGenerativeAI(
-                    model="gemini-1.5-flash",
-                    google_api_key=api_key,
-                    convert_system_message_to_human=True,
-                    streaming=True,
-                    client_options={"api_version": "v1"},
-                )
-                return llm
-            except Exception as e1:
-                err1 = e1
-                try:
-                    llm = ChatGoogleGenerativeAI(
-                        model="models/gemini-1.5-flash",
-                        google_api_key=api_key,
-                        convert_system_message_to_human=True,
-                        streaming=True,
-                        client_options={"api_version": "v1"},
-                    )
-                    return llm
-                except Exception as e2:
-                    try:
-                        llm = ChatGoogleGenerativeAI(
-                            model="gemini-1.5-pro",
-                            google_api_key=api_key,
-                            convert_system_message_to_human=True,
-                            streaming=True,
-                            client_options={"api_version": "v1"},
-                        )
-                        return llm
-                    except Exception as e3:
-                        st.error(f"Gemini 1.5-flash: {err1}\n\nmodels/gemini-1.5-flash: {e2}\n\ngemini-1.5-pro: {e3}")
-                        return None
+            llm = ChatGoogleGenerativeAI(
+                model="gemini-1.5-flash",
+                google_api_key=api_key,
+                temperature=0,
+                max_output_tokens=None,
+                timeout=None,
+                max_retries=2,
+            )
+            return llm
         elif provider == "OpenAI (ChatGPT)":
             return ChatOpenAI(model="gpt-4o-mini", api_key=SecretStr(api_key), temperature=0.7)
         else:
