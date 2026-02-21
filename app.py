@@ -30,6 +30,17 @@ FAISS_INDEX_DIR = _SCRIPT_DIR / "faiss_index_local"
 HISTORY_FILE = _SCRIPT_DIR / "history.json"
 CONFIG_FILE = _SCRIPT_DIR / "config.yaml"
 
+def _get_global_api_key(provider: str) -> str:
+    try:
+        if hasattr(st, "secrets"):
+            if provider == "Google Gemini":
+                return (st.secrets.get("GOOGLE_API_KEY") or st.secrets.get("gemini_api_key") or "").strip()
+            if provider == "OpenAI (ChatGPT)":
+                return (st.secrets.get("OPENAI_API_KEY") or "").strip()
+    except Exception:
+        pass
+    return ""
+
 def _get_default_gemini_api_key() -> str:
     try:
         if hasattr(st, "secrets") and st.secrets.get("gemini_api_key"):
@@ -37,6 +48,18 @@ def _get_default_gemini_api_key() -> str:
     except Exception:
         pass
     return (os.environ.get("RADSEQ_DEFAULT_GEMINI_API_KEY") or "").strip()
+
+def _resolve_api_key(provider: str, user_key: str) -> tuple[str, bool]:
+    global_key = _get_global_api_key(provider)
+    user_val = (user_key or "").strip()
+    if global_key:
+        return global_key, True
+    if user_val:
+        return user_val, False
+    if provider == "Google Gemini":
+        effective = _get_default_gemini_api_key()
+        return effective, bool(effective)
+    return "", False
 
 # --- SPRÁVA KONFIGURACE A AUTENTIZACE ---
 def _default_config() -> dict:
@@ -898,13 +921,15 @@ def main():
             
             st.divider()
             
-            # Dynamický popisek podle vybraného poskytovatele
-            api_key_label = "Google API Key" if selected_provider == "Google Gemini" else "OpenAI API Key"
-            api_key_help = f"Zadejte nebo upravte svůj {api_key_label}. Pro trvalé uložení použijte tlačítko 'Uložit API klíč' níže."
+            _eff_key, using_global_key = _resolve_api_key(selected_provider, st.session_state.get("api_key_input", "") or stored_api_key)
+            if using_global_key and _eff_key:
+                st.info("Aktuálně se používá globální API klíč administrátora.")
             
-            # API klíč - pole pro zadání/změnu
-            if stored_api_key:
-                st.info(f"✅ API klíč je uložen v profilu a bude automaticky použit pro {selected_provider}.")
+            api_key_label = "Google API Key" if selected_provider == "Google Gemini" else "OpenAI API Key"
+            api_key_help = f"Zadejte nebo upravte svůj {api_key_label}. Uloží se do config.yaml do vašeho profilu a zůstane i po odhlášení."
+            
+            if stored_api_key and not using_global_key:
+                st.caption(f"✅ V profilu máte uložen vlastní API klíč pro {selected_provider}.")
             
             api_key_input = st.text_input(
                 api_key_label, 
@@ -1014,10 +1039,9 @@ def main():
                         except Exception as err:
                             st.error(f"Chyba při ověřování hesla: {err}")
         
-        api_key = st.session_state.get("api_key_input", "") if st.session_state.get("api_key_input", "") else stored_api_key
-        if (not api_key or not str(api_key).strip()) and (st.session_state.get("ai_provider", stored_provider) == "Google Gemini"):
-            api_key = _get_default_gemini_api_key()
+        user_key = st.session_state.get("api_key_input", "") or stored_api_key
         ai_provider = st.session_state.get("ai_provider", stored_provider)
+        api_key, _using_global_key = _resolve_api_key(ai_provider, user_key)
     
     # Hlavní chat rozhraní
     st.title("🧬 RAD-seq Asistent (Lokalizované vyhledávání)")
@@ -1041,9 +1065,7 @@ def main():
     
     # Vstupní pole pro novou otázku
     if prompt := st.chat_input("Zadejte svůj dotaz (např. filtrování VCF nebo demultiplexing):"):
-        effective_key = (api_key or "").strip() if api_key else ""
-        if ai_provider == "Google Gemini" and not effective_key:
-            effective_key = _get_default_gemini_api_key()
+        effective_key, _ = _resolve_api_key(ai_provider, st.session_state.get("api_key_input", "") or stored_api_key)
         if not effective_key:
             provider_name = "Google API klíč" if ai_provider == "Google Gemini" else "OpenAI API klíč"
             st.warning(f"⚠️ Prosím, zadejte {provider_name} v sekci 'Nastavení' v sidebaru, nebo ho uložte do svého profilu.")
