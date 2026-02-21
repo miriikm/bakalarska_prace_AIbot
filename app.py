@@ -12,17 +12,11 @@ import streamlit_authenticator as stauth
 
 from langchain_community.document_loaders import RecursiveUrlLoader, DirectoryLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_openai import ChatOpenAI
-from langchain_huggingface import HuggingFaceEmbeddings # Lokální embedding bez limitů
+from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 
 # --- KONFIGURACE ---
-DEFAULT_URLS = [
-    "https://github.com/speciationgenomics/data",
-    "https://github.com/speciationgenomics",
-    "https://speciationgenomics.github.io/",
-]
 _SCRIPT_DIR = Path(__file__).resolve().parent
 DOCS_DIR = _SCRIPT_DIR / "docs"
 DOCS_DIR.mkdir(exist_ok=True)
@@ -610,6 +604,18 @@ Odpověz pouze jedním slovem: "greeting" nebo "technical":"""
     
     return "technical"
 
+def _get_embeddings(api_key: str, provider: str):
+    if not api_key or not api_key.strip():
+        return None
+    try:
+        if provider == "Google Gemini":
+            return GoogleGenerativeAIEmbeddings(api_key=SecretStr(api_key), model="models/embedding-001")
+        if provider == "OpenAI (ChatGPT)":
+            return OpenAIEmbeddings(api_key=SecretStr(api_key), model="text-embedding-3-small")
+    except Exception:
+        return None
+    return None
+
 def _stream_or_invoke(llm, prompt: str) -> tuple[str, bool]:
     try:
         if getattr(llm, "streaming", False) and hasattr(llm, "stream"):
@@ -626,12 +632,11 @@ def _stream_or_invoke(llm, prompt: str) -> tuple[str, bool]:
     return content, False
 
 @st.cache_resource(show_spinner=False)
-def get_vectorstore_for_query():
+def get_vectorstore_for_query(_api_key: str, _provider: str):
     if not FAISS_INDEX_DIR.exists():
         return None
-    try:
-        embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-    except Exception:
+    embeddings = _get_embeddings(_api_key, _provider)
+    if embeddings is None:
         return None
     try:
         return FAISS.load_local(str(FAISS_INDEX_DIR), embeddings, allow_dangerous_deserialization=True)
@@ -639,28 +644,17 @@ def get_vectorstore_for_query():
         return None
 
 @st.cache_resource(show_spinner=True)
-def build_vectorstore():
-    try:
-        embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-    except Exception as e:
-        raise RuntimeError(
-            "Připravují se modely pro vyhledávání v manuálech. "
-            "Nainstalujte balíček sentence-transformers (pip install sentence-transformers) a zkuste znovu, "
-            "nebo počkejte na dokončení prvního stahování modelu. Technická chyba: " + str(e)
-        ) from e
+def build_vectorstore(_api_key: str, _provider: str):
+    embeddings = _get_embeddings(_api_key, _provider)
+    if embeddings is None:
+        return None
     index_path = str(FAISS_INDEX_DIR)
     if FAISS_INDEX_DIR.exists():
         try:
             return FAISS.load_local(index_path, embeddings, allow_dangerous_deserialization=True)
-        except Exception as e:
-            raise RuntimeError(f"Načtení FAISS indexu selhalo: {e}") from e
-    all_docs = []
-    for url in DEFAULT_URLS:
-        try:
-            loader = RecursiveUrlLoader(url=url, max_depth=2, timeout=10)
-            all_docs.extend(loader.load())
         except Exception:
             pass
+    all_docs = []
     if DOCS_DIR.exists() and any(DOCS_DIR.iterdir()):
         for pattern in ["**/*.md", "**/*.txt", "**/*.pdf"]:
             try:
@@ -674,15 +668,19 @@ def build_vectorstore():
     docs = splitter.split_documents(all_docs)
     try:
         vectorstore = FAISS.from_documents(docs, embeddings)
-    except Exception as e:
-        raise RuntimeError(f"Vytvoření FAISS z dokumentů selhalo: {e}") from e
+    except Exception:
+        return None
     vectorstore.save_local(index_path)
     return vectorstore
 
 def main():
     st.set_page_config(page_title="RAD-seq Bioinfo Helper", layout="wide")
-    
-    # Načtení konfigurace
+    if "_cache_cleared_at_start" not in st.session_state:
+        try:
+            st.cache_resource.clear()
+        except Exception:
+            pass
+        st.session_state["_cache_cleared_at_start"] = True
     config = load_config()
     
     # Vytvoření authenticatoru JEDNOU pomocí cache (aby se předešlo duplicitním klíčům)
@@ -854,11 +852,6 @@ def main():
         
         # SEKCE MANUÁLY - Expander se správou manuálů
         with st.expander("📚 Správa manuálů", expanded=False):
-            st.subheader("📌 Předinstalované zdroje")
-            st.caption("Bot již pracuje s těmito weby (vždy zahrnuty při sestavení znalostní báze):")
-            for url in DEFAULT_URLS:
-                st.markdown(f"- [{url}]({url})")
-            st.divider()
             uploaded_file = st.file_uploader(
                 "Nahraj manuál (.md, .txt nebo .pdf)",
                 type=["md", "txt", "pdf"],
@@ -900,9 +893,9 @@ def main():
                                 with st.spinner("Přestavuji znalostní bázi s novým manuálem..."):
                                     if FAISS_INDEX_DIR.exists():
                                         shutil.rmtree(str(FAISS_INDEX_DIR))
-                                    # Vymazání cache pro build_vectorstore
                                     st.cache_resource.clear()
-                                    vs = build_vectorstore()
+                                    _key, _ = _resolve_api_key(st.session_state.get("ai_provider", stored_provider), st.session_state.get("api_key_input", "") or stored_api_key)
+                                    vs = build_vectorstore(_key, st.session_state.get("ai_provider", stored_provider))
                                 
                                 if vs is not None:
                                     st.success("🎉 Znalostní báze byla úspěšně aktualizována a nový webový manuál je nyní k dispozici v chatu!")
@@ -921,9 +914,9 @@ def main():
                 with st.spinner("Přestavuji znalostní bázi..."):
                     if FAISS_INDEX_DIR.exists():
                         shutil.rmtree(str(FAISS_INDEX_DIR))
-                    # Vymazání cache pro build_vectorstore
                     st.cache_resource.clear()
-                    vs = build_vectorstore()
+                    _key, _ = _resolve_api_key(st.session_state.get("ai_provider", stored_provider), st.session_state.get("api_key_input", "") or stored_api_key)
+                    vs = build_vectorstore(_key, st.session_state.get("ai_provider", stored_provider))
 
                 if vs is not None:
                     st.success("Znalostní báze byla úspěšně znovu vytvořena a nový manuál byl integrován.")
@@ -1156,19 +1149,14 @@ def main():
                     with st.spinner("Hledám v manuálech a připravuji odpověď..."):
                         vs = None
                         try:
-                            vs = get_vectorstore_for_query()
-                        except Exception as e:
-                            err_msg = str(e)
-                            if "Připravují se modely" in err_msg or "HuggingFaceEmbeddings" in err_msg or "sentence" in err_msg.lower():
-                                st.warning("Připravují se modely pro vyhledávání v manuálech. Odpovídám z obecných znalostí. Zkuste to znovu za chvíli.")
-                            else:
-                                st.error(f"Chyba embeddings/vektorové databáze: {e}")
+                            vs = get_vectorstore_for_query(api_key, ai_provider)
+                        except Exception:
+                            vs = None
                             general_knowledge_fallback = True
-                            st.caption("Nepodařilo se prohledat lokální manuály, odpovídám z obecných znalostí.")
                         if vs is None and general_knowledge_fallback:
                             full_prompt = PROMPT_TEMPLATE_NO_CONTEXT.format(question=prompt)
                         elif vs is None:
-                            st.warning("Znalostní báze není k dispozici. Pro vyhledávání v manuálech klikněte na 'Rebuild Knowledge Base' v sekci Správa manuálů. Odpovídám na základě obecných znalostí.")
+                            st.warning("Znalostní báze je prázdná, odpovídám z obecných znalostí.")
                             full_prompt = PROMPT_TEMPLATE_NO_CONTEXT.format(question=prompt)
                         else:
                             try:
