@@ -241,7 +241,6 @@ def show_login_registration_tabs(config: dict, authenticator):
             login_result = authenticator.login(location="main")
             if login_result and len(login_result) == 3:
                 name, authentication_status, username = login_result
-                
                 if authentication_status:
                     if username:
                         st.session_state["authentication_status"] = True
@@ -251,12 +250,12 @@ def show_login_registration_tabs(config: dict, authenticator):
                         st.session_state["user_email"] = user_email
                         st.success(f"Vítejte, {name}!")
                         st.rerun()
-                elif authentication_status == False:
-                    st.error("Nesprávné uživatelské jméno nebo heslo.")
-                elif authentication_status == None:
-                    st.warning("Zadejte prosím své přihlašovací údaje.")
-        except Exception as e:
-            st.warning("Zadejte prosím své přihlašovací údaje.")
+                elif authentication_status is False:
+                    st.error("❌ Neplatné uživatelské jméno nebo heslo. Zkuste to prosím znovu.")
+                else:
+                    st.warning("⚠️ Prosím vyplňte uživatelské jméno a heslo.")
+        except Exception:
+            st.warning("⚠️ Prosím vyplňte uživatelské jméno a heslo.")
     
     with tab2:
         st.subheader("Registrace")
