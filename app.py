@@ -18,13 +18,25 @@ from langchain_huggingface import HuggingFaceEmbeddings # Lokální embedding be
 from langchain_community.vectorstores import FAISS
 
 # --- KONFIGURACE ---
-BASE_URL = "https://speciationgenomics.github.io/"
+DEFAULT_URLS = [
+    "https://github.com/speciationgenomics/data",
+    "https://github.com/speciationgenomics",
+    "https://speciationgenomics.github.io/",
+]
 _SCRIPT_DIR = Path(__file__).resolve().parent
 DOCS_DIR = _SCRIPT_DIR / "docs"
 DOCS_DIR.mkdir(exist_ok=True)
 FAISS_INDEX_DIR = _SCRIPT_DIR / "faiss_index_local"
 HISTORY_FILE = _SCRIPT_DIR / "history.json"
 CONFIG_FILE = _SCRIPT_DIR / "config.yaml"
+
+def _get_default_gemini_api_key() -> str:
+    try:
+        if hasattr(st, "secrets") and st.secrets.get("gemini_api_key"):
+            return str(st.secrets["gemini_api_key"]).strip()
+    except Exception:
+        pass
+    return (os.environ.get("RADSEQ_DEFAULT_GEMINI_API_KEY") or "").strip()
 
 # --- SPRÁVA KONFIGURACE A AUTENTIZACE ---
 def _default_config() -> dict:
@@ -241,6 +253,7 @@ def show_login_registration_tabs(config: dict, authenticator):
             login_result = authenticator.login(location="main")
             if login_result and len(login_result) == 3:
                 name, authentication_status, username = login_result
+                
                 if authentication_status:
                     if username:
                         st.session_state["authentication_status"] = True
@@ -250,12 +263,12 @@ def show_login_registration_tabs(config: dict, authenticator):
                         st.session_state["user_email"] = user_email
                         st.success(f"Vítejte, {name}!")
                         st.rerun()
-                elif authentication_status is False:
-                    st.error("❌ Neplatné uživatelské jméno nebo heslo. Zkuste to prosím znovu.")
-                else:
-                    st.warning("⚠️ Prosím vyplňte uživatelské jméno a heslo.")
-        except Exception:
-            st.warning("⚠️ Prosím vyplňte uživatelské jméno a heslo.")
+                elif authentication_status == False:
+                    st.error("Nesprávné uživatelské jméno nebo heslo.")
+                elif authentication_status == None:
+                    st.warning("Zadejte prosím své přihlašovací údaje.")
+        except Exception as e:
+            st.warning("Zadejte prosím své přihlašovací údaje.")
     
     with tab2:
         st.subheader("Registrace")
@@ -420,15 +433,25 @@ def show_profile_management(config: dict, username: str):
                     st.error(f"Chyba při ověřování hesla: {err}")
 
 def create_llm_instance(provider: str, api_key: str):
-    """Vytvoří instanci LLM podle vybraného poskytovatele."""
     if not api_key or api_key is None or (isinstance(api_key, str) and api_key.strip() == ""):
         return None
-    
     try:
         if provider == "Google Gemini":
-            return ChatGoogleGenerativeAI(model="gemini-1.5-flash-latest", google_api_key=api_key)
+            try:
+                llm = ChatGoogleGenerativeAI(
+                    model="gemini-2.5-flash",
+                    google_api_key=api_key,
+                    convert_system_message_to_human=True,
+                )
+            except Exception:
+                llm = ChatGoogleGenerativeAI(
+                    model="gemini-pro",
+                    google_api_key=api_key,
+                    convert_system_message_to_human=True,
+                )
+            print(f"DEBUG: Používám model {getattr(llm, 'model', '?')}")
+            return llm
         elif provider == "OpenAI (ChatGPT)":
-            # Pro OpenAI použijeme SecretStr pro správné typování
             return ChatOpenAI(model="gpt-4o-mini", api_key=SecretStr(api_key), temperature=0.7)
         else:
             return None
@@ -575,11 +598,12 @@ def build_vectorstore():
         except Exception as e:
             raise RuntimeError(f"Načtení FAISS indexu selhalo: {e}") from e
     all_docs = []
-    try:
-        loader = RecursiveUrlLoader(url=BASE_URL, max_depth=2)
-        all_docs.extend(loader.load())
-    except Exception:
-        pass
+    for url in DEFAULT_URLS:
+        try:
+            loader = RecursiveUrlLoader(url=url, max_depth=2)
+            all_docs.extend(loader.load())
+        except Exception:
+            pass
     if DOCS_DIR.exists() and any(DOCS_DIR.iterdir()):
         for pattern in ["**/*.md", "**/*.txt", "**/*.pdf"]:
             try:
@@ -768,7 +792,11 @@ def main():
         
         # SEKCE MANUÁLY - Expander se správou manuálů
         with st.expander("📚 Správa manuálů", expanded=False):
-            # Nahrání souboru
+            st.subheader("📌 Předinstalované zdroje")
+            st.caption("Bot již pracuje s těmito weby (vždy zahrnuty při sestavení znalostní báze):")
+            for url in DEFAULT_URLS:
+                st.markdown(f"- [{url}]({url})")
+            st.divider()
             uploaded_file = st.file_uploader(
                 "Nahraj manuál (.md, .txt nebo .pdf)",
                 type=["md", "txt", "pdf"],
@@ -986,9 +1014,9 @@ def main():
                         except Exception as err:
                             st.error(f"Chyba při ověřování hesla: {err}")
         
-        # Použijeme API klíč z inputu, nebo pokud je prázdný, použijeme uložený z profilu
         api_key = st.session_state.get("api_key_input", "") if st.session_state.get("api_key_input", "") else stored_api_key
-        # Použijeme poskytovatele z session_state nebo uloženého
+        if (not api_key or not str(api_key).strip()) and (st.session_state.get("ai_provider", stored_provider) == "Google Gemini"):
+            api_key = _get_default_gemini_api_key()
         ai_provider = st.session_state.get("ai_provider", stored_provider)
     
     # Hlavní chat rozhraní
@@ -1013,11 +1041,14 @@ def main():
     
     # Vstupní pole pro novou otázku
     if prompt := st.chat_input("Zadejte svůj dotaz (např. filtrování VCF nebo demultiplexing):"):
-        # Validace API klíče - zkontrolujeme, zda není None nebo prázdný string
-        if not api_key or api_key is None or (isinstance(api_key, str) and api_key.strip() == ""):
+        effective_key = (api_key or "").strip() if api_key else ""
+        if ai_provider == "Google Gemini" and not effective_key:
+            effective_key = _get_default_gemini_api_key()
+        if not effective_key:
             provider_name = "Google API klíč" if ai_provider == "Google Gemini" else "OpenAI API klíč"
             st.warning(f"⚠️ Prosím, zadejte {provider_name} v sekci 'Nastavení' v sidebaru, nebo ho uložte do svého profilu.")
             st.stop()
+        api_key = effective_key
         
         # Kontrola, zda má uživatel správný klíč pro vybraný poskytovatele
         if ai_provider == "OpenAI (ChatGPT)" and not api_key.startswith("sk-"):
@@ -1063,48 +1094,42 @@ def main():
                         full_prompt = PROMPT_TEMPLATE_NO_CONTEXT.format(question=prompt)
                         response = llm.invoke(full_prompt)
                 else:
-                    if not DOCS_DIR.exists() or not any(DOCS_DIR.iterdir()):
-                        st.warning("Složka 'docs/' je prázdná nebo neexistuje. Nejprve nahrajte manuály.")
-                        general_knowledge_fallback = True
-                        full_prompt = PROMPT_TEMPLATE_NO_CONTEXT.format(question=prompt)
-                        response = llm.invoke(full_prompt)
-                    else:
-                        with st.spinner("Prohledávám manuály na pozadí..."):
-                            vs = None
+                    with st.spinner("Prohledávám manuály na pozadí..."):
+                        vs = None
+                        try:
+                            vs = build_vectorstore()
+                        except Exception as e:
+                            st.error(f"Chyba embeddings/vektorové databáze: {e}")
+                            general_knowledge_fallback = True
+                            st.warning("Nepodařilo se prohledat lokální manuály, odpovídám z obecných znalostí.")
+                        if vs is None and general_knowledge_fallback:
+                            full_prompt = PROMPT_TEMPLATE_NO_CONTEXT.format(question=prompt)
+                            response = llm.invoke(full_prompt)
+                        elif vs is None:
+                            st.warning("Znalostní báze není k dispozici. Odpovídám na základě obecných znalostí.")
+                            full_prompt = PROMPT_TEMPLATE_NO_CONTEXT.format(question=prompt)
+                            response = llm.invoke(full_prompt)
+                        else:
                             try:
-                                vs = build_vectorstore()
-                            except Exception as e:
-                                st.error(f"Chyba embeddings/vektorové databáze: {e}")
+                                retriever = vs.as_retriever(search_kwargs={"k": 5})
+                                relevant_docs = retriever.invoke(prompt)
+                            except Exception:
+                                relevant_docs = []
                                 general_knowledge_fallback = True
-                                st.warning("Nepodařilo se prohledat lokální manuály, odpovídám z obecných znalostí.")
-                            if vs is None and general_knowledge_fallback:
-                                full_prompt = PROMPT_TEMPLATE_NO_CONTEXT.format(question=prompt)
-                                response = llm.invoke(full_prompt)
-                            elif vs is None:
-                                st.warning("Znalostní báze není k dispozici. Odpovídám na základě obecných znalostí.")
-                                full_prompt = PROMPT_TEMPLATE_NO_CONTEXT.format(question=prompt)
-                                response = llm.invoke(full_prompt)
-                            else:
+                            context_text = ""
+                            if relevant_docs and len(relevant_docs) > 0:
                                 try:
-                                    retriever = vs.as_retriever(search_kwargs={"k": 5})
-                                    relevant_docs = retriever.invoke(prompt)
-                                except Exception:
-                                    relevant_docs = []
-                                    general_knowledge_fallback = True
-                                context_text = ""
-                                if relevant_docs and len(relevant_docs) > 0:
-                                    try:
-                                        context_text = "\n\n".join([f"Zdroj: {d.metadata.get('source', 'Neznámý zdroj')}\n{d.page_content}" for d in relevant_docs])
-                                    except (IndexError, TypeError, AttributeError):
-                                        context_text = ""
-                                if context_text is None or not str(context_text).strip():
-                                    general_knowledge_fallback = True
-                                if general_knowledge_fallback or not context_text or not str(context_text).strip():
-                                    full_prompt = PROMPT_TEMPLATE_NO_CONTEXT.format(question=prompt)
-                                    st.warning("Nepodařilo se prohledat lokální manuály, odpovídám z obecných znalostí.")
-                                else:
-                                    full_prompt = PROMPT_TEMPLATE.format(context=context_text, question=prompt)
-                                response = llm.invoke(full_prompt)
+                                    context_text = "\n\n".join([f"Zdroj: {d.metadata.get('source', 'Neznámý zdroj')}\n{d.page_content}" for d in relevant_docs])
+                                except (IndexError, TypeError, AttributeError):
+                                    context_text = ""
+                            if context_text is None or not str(context_text).strip():
+                                general_knowledge_fallback = True
+                            if general_knowledge_fallback or not context_text or not str(context_text).strip():
+                                full_prompt = PROMPT_TEMPLATE_NO_CONTEXT.format(question=prompt)
+                                st.warning("Nepodařilo se prohledat lokální manuály, odpovídám z obecných znalostí.")
+                            else:
+                                full_prompt = PROMPT_TEMPLATE.format(context=context_text, question=prompt)
+                            response = llm.invoke(full_prompt)
 
                 # Ošetření odpovědi - zkontrolujeme, zda response a response.content existují
                 if response and hasattr(response, 'content') and response.content:
