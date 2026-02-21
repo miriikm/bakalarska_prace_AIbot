@@ -3,10 +3,10 @@ streamlit-authenticator
 langchain
 langchain-community
 langchain-openai
-langchain-google-genai>=1.0.10
+langchain-google-genai
 langchain-huggingface
+sentence-transformers
 faiss-cpu
 pypdf
 beautifulsoup4
 pyyaml
-requests

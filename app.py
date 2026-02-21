@@ -613,7 +613,11 @@ def build_vectorstore():
     try:
         embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
     except Exception as e:
-        raise RuntimeError(f"Inicializace HuggingFaceEmbeddings selhala: {e}") from e
+        raise RuntimeError(
+            "Připravují se modely pro vyhledávání v manuálech. "
+            "Nainstalujte balíček sentence-transformers (pip install sentence-transformers) a zkuste znovu, "
+            "nebo počkejte na dokončení prvního stahování modelu. Technická chyba: " + str(e)
+        ) from e
     index_path = str(FAISS_INDEX_DIR)
     if FAISS_INDEX_DIR.exists():
         try:
@@ -1121,9 +1125,13 @@ def main():
                         try:
                             vs = build_vectorstore()
                         except Exception as e:
-                            st.error(f"Chyba embeddings/vektorové databáze: {e}")
+                            err_msg = str(e)
+                            if "Připravují se modely" in err_msg or "HuggingFaceEmbeddings" in err_msg or "sentence" in err_msg.lower():
+                                st.warning("Připravují se modely pro vyhledávání v manuálech. Odpovídám z obecných znalostí. Zkuste to znovu za chvíli.")
+                            else:
+                                st.error(f"Chyba embeddings/vektorové databáze: {e}")
                             general_knowledge_fallback = True
-                            st.warning("Nepodařilo se prohledat lokální manuály, odpovídám z obecných znalostí.")
+                            st.caption("Nepodařilo se prohledat lokální manuály, odpovídám z obecných znalostí.")
                         if vs is None and general_knowledge_fallback:
                             full_prompt = PROMPT_TEMPLATE_NO_CONTEXT.format(question=prompt)
                             response = llm.invoke(full_prompt)
