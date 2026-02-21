@@ -222,7 +222,7 @@ def load_manual_from_url(url: str) -> tuple[bool, str, int]:
     
     try:
         # Načtení dokumentů z URL pomocí RecursiveUrlLoader
-        loader = RecursiveUrlLoader(url=url, max_depth=2)
+        loader = RecursiveUrlLoader(url=url, max_depth=2, timeout=10)
         docs = loader.load()
         
         if not docs or len(docs) == 0:
@@ -625,6 +625,19 @@ def _stream_or_invoke(llm, prompt: str) -> tuple[str, bool]:
     content = (getattr(r, "content", None) or str(r) or "").strip()
     return content, False
 
+@st.cache_resource(show_spinner=False)
+def get_vectorstore_for_query():
+    if not FAISS_INDEX_DIR.exists():
+        return None
+    try:
+        embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+    except Exception:
+        return None
+    try:
+        return FAISS.load_local(str(FAISS_INDEX_DIR), embeddings, allow_dangerous_deserialization=True)
+    except Exception:
+        return None
+
 @st.cache_resource(show_spinner=True)
 def build_vectorstore():
     try:
@@ -644,7 +657,7 @@ def build_vectorstore():
     all_docs = []
     for url in DEFAULT_URLS:
         try:
-            loader = RecursiveUrlLoader(url=url, max_depth=2)
+            loader = RecursiveUrlLoader(url=url, max_depth=2, timeout=10)
             all_docs.extend(loader.load())
         except Exception:
             pass
@@ -729,6 +742,11 @@ def main():
             st.session_state["messages"] = []
             st.session_state["current_conversation_id"] = None
             st.session_state["conversation_title"] = None
+            st.rerun()
+        
+        if st.button("🔄 Nouzový reset aplikace", use_container_width=True, help="Vymaže session a restartuje aplikaci při zaseknutí."):
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
             st.rerun()
         
         # Logout tlačítko
@@ -1118,7 +1136,7 @@ def main():
         # Generování odpovědi
         with st.chat_message("assistant"):
             try:
-                # ROZLIŠENÍ ZÁMĚRU (Routing) - rozhodneme, zda použít RAG nebo odpovědět přímo
+                print("DEBUG: Startuji proces LLM")
                 intent = classify_user_intent(prompt, api_key, ai_provider)
                 
                 # Dynamická inicializace LLM modelu podle poskytovatele
@@ -1138,7 +1156,7 @@ def main():
                     with st.spinner("Hledám v manuálech a připravuji odpověď..."):
                         vs = None
                         try:
-                            vs = build_vectorstore()
+                            vs = get_vectorstore_for_query()
                         except Exception as e:
                             err_msg = str(e)
                             if "Připravují se modely" in err_msg or "HuggingFaceEmbeddings" in err_msg or "sentence" in err_msg.lower():
@@ -1150,7 +1168,7 @@ def main():
                         if vs is None and general_knowledge_fallback:
                             full_prompt = PROMPT_TEMPLATE_NO_CONTEXT.format(question=prompt)
                         elif vs is None:
-                            st.warning("Znalostní báze není k dispozici. Odpovídám na základě obecných znalostí.")
+                            st.warning("Znalostní báze není k dispozici. Pro vyhledávání v manuálech klikněte na 'Rebuild Knowledge Base' v sekci Správa manuálů. Odpovídám na základě obecných znalostí.")
                             full_prompt = PROMPT_TEMPLATE_NO_CONTEXT.format(question=prompt)
                         else:
                             try:
