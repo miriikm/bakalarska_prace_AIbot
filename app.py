@@ -465,12 +465,14 @@ def create_llm_instance(provider: str, api_key: str):
                     model="gemini-2.5-flash",
                     google_api_key=api_key,
                     convert_system_message_to_human=True,
+                    streaming=True,
                 )
             except Exception:
                 llm = ChatGoogleGenerativeAI(
                     model="gemini-pro",
                     google_api_key=api_key,
                     convert_system_message_to_human=True,
+                    streaming=True,
                 )
             print(f"DEBUG: Používám model {getattr(llm, 'model', '?')}")
             return llm
@@ -607,6 +609,21 @@ Odpověz pouze jedním slovem: "greeting" nebo "technical":"""
         pass  # Pokud selže klasifikace, použijeme RAG jako default
     
     return "technical"
+
+def _stream_or_invoke(llm, prompt: str) -> tuple[str, bool]:
+    try:
+        if getattr(llm, "streaming", False) and hasattr(llm, "stream"):
+            def _gen():
+                for chunk in llm.stream(prompt):
+                    if getattr(chunk, "content", None):
+                        yield chunk.content
+            content = st.write_stream(_gen())
+            return (str(content) if content else "").strip(), True
+    except Exception:
+        pass
+    r = llm.invoke(prompt)
+    content = (getattr(r, "content", None) or str(r) or "").strip()
+    return content, False
 
 @st.cache_resource(show_spinner=True)
 def build_vectorstore():
@@ -1116,11 +1133,9 @@ def main():
                 general_knowledge_fallback = False
 
                 if intent == "greeting":
-                    with st.spinner("Přemýšlím..."):
-                        full_prompt = PROMPT_TEMPLATE_NO_CONTEXT.format(question=prompt)
-                        response = llm.invoke(full_prompt)
+                    full_prompt = PROMPT_TEMPLATE_NO_CONTEXT.format(question=prompt)
                 else:
-                    with st.spinner("Prohledávám manuály na pozadí..."):
+                    with st.spinner("Hledám v manuálech a připravuji odpověď..."):
                         vs = None
                         try:
                             vs = build_vectorstore()
@@ -1134,11 +1149,9 @@ def main():
                             st.caption("Nepodařilo se prohledat lokální manuály, odpovídám z obecných znalostí.")
                         if vs is None and general_knowledge_fallback:
                             full_prompt = PROMPT_TEMPLATE_NO_CONTEXT.format(question=prompt)
-                            response = llm.invoke(full_prompt)
                         elif vs is None:
                             st.warning("Znalostní báze není k dispozici. Odpovídám na základě obecných znalostí.")
                             full_prompt = PROMPT_TEMPLATE_NO_CONTEXT.format(question=prompt)
-                            response = llm.invoke(full_prompt)
                         else:
                             try:
                                 retriever = vs.as_retriever(search_kwargs={"k": 5})
@@ -1159,18 +1172,15 @@ def main():
                                 st.warning("Nepodařilo se prohledat lokální manuály, odpovídám z obecných znalostí.")
                             else:
                                 full_prompt = PROMPT_TEMPLATE.format(context=context_text, question=prompt)
-                            response = llm.invoke(full_prompt)
 
-                # Ošetření odpovědi - zkontrolujeme, zda response a response.content existují
-                if response and hasattr(response, 'content') and response.content:
-                    response_content = str(response.content) if response.content else ""
-                else:
+                with st.spinner("Hledám v manuálech a připravuji odpověď..." if intent != "greeting" else "Přemýšlím..."):
+                    response_content, streamed = _stream_or_invoke(llm, full_prompt)
+                if not response_content:
                     st.error("Model nevrátil žádnou odpověď. Zkuste to prosím znovu.")
-                    st.session_state["messages"].pop()  # Odstraníme chybnou zprávu
+                    st.session_state["messages"].pop()
                     st.stop()
-
-                # Zobrazíme odpověď (formátování je už v Markdownu z promptu)
-                st.markdown(response_content)
+                if not streamed:
+                    st.markdown(response_content)
                 
                 # Přidáme odpověď do zpráv
                 st.session_state["messages"].append({"role": "assistant", "content": response_content})
