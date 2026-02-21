@@ -145,6 +145,10 @@ Po prvním přihlášení do aplikace si můžete nastavit preferovaný AI model
 4. **Položení otázky**: Zadejte dotaz týkající se RAD-seq analýzy do chat rozhraní
 5. **Získání odpovědi**: Aplikace vyhledá relevantní informace a vygeneruje odpověď s Bash příkazy
 
+## Nasazení na hosting (Streamlit Cloud apod.)
+
+Aby na hostingu fungovalo vyhledávání v manuálu (RAG), musí být v repozitáři složka **`faiss_index_static/`** včetně souborů **`index.faiss`** a **`index.pkl`** (vygenerované příkazem `python build_faiss_from_static.py`). Pokud index na hostingu nejde načíst (např. byl sestaven na Windows a hosting běží na Linuxu), aplikace zobrazí varování s důvodem a odpověď bude bez kontextu z manuálu. V takovém případě sestavte index ve stejném prostředí jako hosting (např. lokálně na Linuxu nebo v CI) a nahrajte ho do gitu.
+
 ## Bezpečnostní poznámka
 
 ⚠️ **DŮLEŽITÉ**: Citlivá data (API klíče pro Google Gemini nebo OpenAI, hesla) jsou uložena lokálně v souboru `config.yaml` a **nejsou součástí repozitáře**. Tento soubor je automaticky ignorován pomocí `.gitignore`.

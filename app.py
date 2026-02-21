@@ -553,6 +553,24 @@ def _stream_or_invoke(llm, prompt: str) -> tuple[str, bool]:
     content = (getattr(r, "content", None) or str(r) or "").strip()
     return content, False
 
+def _get_rag_failure_reason() -> str:
+    if not FAISS_INDEX_STATIC.exists():
+        return "Složka faiss_index_static v projektu chybí. Nahraj ji na hosting (včetně index.faiss a index.pkl)."
+    if not (FAISS_INDEX_STATIC / "index.faiss").exists():
+        return "V faiss_index_static chybí soubor index.faiss. Spusť lokálně: python build_faiss_from_static.py a nahraj složku na git."
+    emb = _get_local_embeddings()
+    if emb is None:
+        return "Embedding model (sentence-transformers) se na tomto prostředí nepodařilo načíst. Na hostingu může chybět závislost nebo síťové stažení modelu."
+    for index_dir in (FAISS_INDEX_STATIC, FAISS_INDEX_DIR):
+        if not index_dir.exists() or not (index_dir / "index.faiss").exists():
+            continue
+        try:
+            FAISS.load_local(str(index_dir), emb, allow_dangerous_deserialization=True)
+            return ""
+        except Exception as e:
+            return f"Index se na tomto prostředí nepodařilo načíst (např. jiná platforma než při sestavení). Chyba: {type(e).__name__}: {e}"
+    return "Index nebyl nalezen ani v faiss_index_static, ani v faiss_index_local."
+
 @st.cache_resource(show_spinner=False)
 def get_vectorstore_for_query(_api_key: str, _provider: str):
     if not FAISS_INDEX_STATIC.exists():
@@ -1082,10 +1100,6 @@ def main():
                 if intent == "greeting":
                     full_prompt = prompt
                 else:
-                    if not FAISS_INDEX_STATIC.exists():
-                        st.error("Složka faiss_index_static nebyla v projektu nalezena!")
-                    elif not (FAISS_INDEX_STATIC / "index.faiss").exists():
-                        st.error("Složka faiss_index_static existuje, ale je prázdná. Spusť znovu create_index.py.")
                     with st.spinner("Hledám v manuálech a připravuji odpověď..."):
                         vs = None
                         try:
@@ -1093,12 +1107,14 @@ def main():
                         except Exception:
                             vs = None
                             general_knowledge_fallback = True
-                        if vs is None and general_knowledge_fallback:
-                            full_prompt = prompt
-                        elif vs is None:
-                            index_path = str(FAISS_INDEX_STATIC.resolve())
-                            st.error(f"CHYBA: Index nenalezen v cestě {index_path}")
-                            full_prompt = prompt
+                        if vs is None:
+                            reason = _get_rag_failure_reason()
+                            if reason:
+                                st.warning(f"⚠️ Vyhledávání v manuálu není k dispozici: {reason}")
+                            if general_knowledge_fallback:
+                                full_prompt = prompt
+                            else:
+                                full_prompt = prompt
                         else:
                             try:
                                 retriever = vs.as_retriever(search_kwargs={"k": 5})
@@ -1119,15 +1135,11 @@ def main():
                             else:
                                 full_prompt = PROMPT_TEMPLATE.format(context=context_text, question=prompt)
 
-                if ai_provider == "Google Gemini":
-                    st.write(f"DEBUG: Délka nalezeného kontextu: {len(context_text)} znaků")
                 if intent != "greeting" and len(context_text) == 0:
                     response_content = (
-                        "**Znalostní báze je prázdná.** Manuál z https://speciationgenomics.github.io/ je v projektu (složka `static_docs/`), "
-                        "ale chybí vyhledávací index. V terminálu v adresáři projektu spusť:\n\n"
-                        "1. `pip install sentence-transformers`\n"
-                        "2. `python build_faiss_from_static.py`\n\n"
-                        "Poté aplikaci obnov (F5) a zkus dotaz znovu."
+                        "**Znalostní báze není k dispozici.** Bez vyhledávacího indexu nemůžu odpovídat z manuálu.\n\n"
+                        "**Lokálně:** V terminálu spusť `pip install sentence-transformers` a `python build_faiss_from_static.py`, pak obnov stránku.\n\n"
+                        "**Na hostingu:** Do repozitáře nahraj složku `faiss_index_static` (soubory `index.faiss` a `index.pkl`) vygenerovanou lokálně; na některých hostinzích může být potřeba index sestavit na stejné platformě (Linux)."
                     )
                     streamed = False
                 else:
