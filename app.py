@@ -19,48 +19,67 @@ from langchain_community.vectorstores import FAISS
 
 # --- KONFIGURACE ---
 BASE_URL = "https://speciationgenomics.github.io/"
-DOCS_DIR = Path("docs")
+_SCRIPT_DIR = Path(__file__).resolve().parent
+DOCS_DIR = _SCRIPT_DIR / "docs"
 DOCS_DIR.mkdir(exist_ok=True)
-HISTORY_FILE = Path("history.json")
-CONFIG_FILE = Path("config.yaml")
+FAISS_INDEX_DIR = _SCRIPT_DIR / "faiss_index_local"
+HISTORY_FILE = _SCRIPT_DIR / "history.json"
+CONFIG_FILE = _SCRIPT_DIR / "config.yaml"
 
 # --- SPRÁVA KONFIGURACE A AUTENTIZACE ---
+def _default_config() -> dict:
+    return {
+        "credentials": {"usernames": {}},
+        "cookie": {
+            "expiry_days": 0,
+            "key": secrets.token_hex(16),
+            "name": "radseq_auth"
+        },
+        "preauthorized": {"emails": []}
+    }
+
 def load_config() -> dict:
-    """Načte konfiguraci z config.yaml."""
+    config_path = str(CONFIG_FILE.resolve())
     if not CONFIG_FILE.exists():
-        # Vytvoříme výchozí konfiguraci
-        default_config = {
-            "credentials": {"usernames": {}},
-            "cookie": {
-                "expiry_days": 0,  # Cookies expirují při zavření prohlížeče
-                "key": secrets.token_hex(16),
-                "name": "radseq_auth"
-            },
-            "preauthorized": {"emails": []}
-        }
+        default_config = _default_config()
         save_config(default_config)
         return default_config
-    
     try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
+        with open(config_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        if not data or not isinstance(data, dict):
+            return _default_config()
+        if "credentials" not in data:
+            data["credentials"] = {"usernames": {}}
+        if "cookie" not in data:
+            data["cookie"] = {"expiry_days": 0, "key": secrets.token_hex(16), "name": "radseq_auth"}
+        if "preauthorized" not in data:
+            data["preauthorized"] = {"emails": []}
+        return data
     except Exception:
-        default_config = {
-            "credentials": {"usernames": {}},
-            "cookie": {
-                "expiry_days": 0,  # Cookies expirují při zavření prohlížeče
-                "key": secrets.token_hex(16),
-                "name": "radseq_auth"
-            },
-            "preauthorized": {"emails": []}
-        }
+        default_config = _default_config()
         save_config(default_config)
         return default_config
 
 def save_config(config: dict):
-    """Uloží konfiguraci do config.yaml."""
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        yaml.safe_dump(config, f, allow_unicode=True, sort_keys=False)
+    config_path = str(CONFIG_FILE.resolve())
+    tmp_path = config_path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(config, f, allow_unicode=True, sort_keys=False)
+        if os.path.exists(config_path):
+            backup_path = config_path + ".backup"
+            try:
+                shutil.copy2(config_path, backup_path)
+            except Exception:
+                pass
+        os.replace(tmp_path, config_path)
+    except Exception:
+        try:
+            with open(config_path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(config, f, allow_unicode=True, sort_keys=False)
+        except Exception:
+            raise
 
 def get_user_email_by_username(username: str, config: dict) -> str:
     """Získá email uživatele podle username."""
@@ -275,7 +294,11 @@ def show_login_registration_tabs(config: dict, authenticator):
                 }
                 config["credentials"]["usernames"] = usernames
                 save_config(config)
-                st.success("Účet byl úspěšně vytvořen! Nyní se můžete přihlásit.")
+                st.session_state["authentication_status"] = True
+                st.session_state["username"] = new_username
+                st.session_state["name"] = new_name or new_username
+                st.session_state["user_email"] = str(new_email).strip().lower() if new_email else ""
+                st.success("Účet byl vytvořen. Jste přihlášeni.")
                 st.rerun()
 
 def show_profile_management(config: dict, username: str):
@@ -542,40 +565,37 @@ Odpověz pouze jedním slovem: "greeting" nebo "technical":"""
 
 @st.cache_resource(show_spinner=True)
 def build_vectorstore():
-    # Používáme lokální model, který běží u vás v počítači (zdarma a bez API limitů)
-    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-    
-    index_path = "faiss_index_local"
-    
-    # Pokud už index existuje na disku, prostě ho načteme
-    if os.path.exists(index_path):
-        return FAISS.load_local(index_path, embeddings, allow_dangerous_deserialization=True)
-
-    # Pokud ne, stáhneme data a vytvoříme ho
+    try:
+        embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+    except Exception as e:
+        raise RuntimeError(f"Inicializace HuggingFaceEmbeddings selhala: {e}") from e
+    index_path = str(FAISS_INDEX_DIR)
+    if FAISS_INDEX_DIR.exists():
+        try:
+            return FAISS.load_local(index_path, embeddings, allow_dangerous_deserialization=True)
+        except Exception as e:
+            raise RuntimeError(f"Načtení FAISS indexu selhalo: {e}") from e
     all_docs = []
     try:
         loader = RecursiveUrlLoader(url=BASE_URL, max_depth=2)
         all_docs.extend(loader.load())
-    except:
-        st.warning("Nepodařilo se načíst web, zkouším lokální soubory.")
-
-    if any(DOCS_DIR.iterdir()):
-        # Načtení .md, .txt a .pdf souborů
+    except Exception:
+        pass
+    if DOCS_DIR.exists() and any(DOCS_DIR.iterdir()):
         for pattern in ["**/*.md", "**/*.txt", "**/*.pdf"]:
             try:
                 local_loader = DirectoryLoader(str(DOCS_DIR), glob=pattern)
                 all_docs.extend(local_loader.load())
-            except Exception as e:
-                # Pokud některý loader selže (např. chybí pypdf pro PDF), pokračujeme dál
+            except Exception:
                 continue
-
     if not all_docs:
         return None
-
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
     docs = splitter.split_documents(all_docs)
-
-    vectorstore = FAISS.from_documents(docs, embeddings)
+    try:
+        vectorstore = FAISS.from_documents(docs, embeddings)
+    except Exception as e:
+        raise RuntimeError(f"Vytvoření FAISS z dokumentů selhalo: {e}") from e
     vectorstore.save_local(index_path)
     return vectorstore
 
@@ -789,8 +809,8 @@ def main():
                                 
                                 # Automatické spuštění rebuild znalostní báze
                                 with st.spinner("Přestavuji znalostní bázi s novým manuálem..."):
-                                    if os.path.exists("faiss_index_local"):
-                                        shutil.rmtree("faiss_index_local")
+                                    if FAISS_INDEX_DIR.exists():
+                                        shutil.rmtree(str(FAISS_INDEX_DIR))
                                     # Vymazání cache pro build_vectorstore
                                     st.cache_resource.clear()
                                     vs = build_vectorstore()
@@ -810,8 +830,8 @@ def main():
             # Rebuild znalostní báze
             if st.button("🔄 Rebuild Knowledge Base", use_container_width=True):
                 with st.spinner("Přestavuji znalostní bázi..."):
-                    if os.path.exists("faiss_index_local"):
-                        shutil.rmtree("faiss_index_local")
+                    if FAISS_INDEX_DIR.exists():
+                        shutil.rmtree(str(FAISS_INDEX_DIR))
                     # Vymazání cache pro build_vectorstore
                     st.cache_resource.clear()
                     vs = build_vectorstore()
@@ -1036,40 +1056,56 @@ def main():
                     st.session_state["messages"].pop()  # Odstraníme chybnou zprávu
                     st.stop()
                 
-                # Inicializace relevant_docs pro případ, že nebude použito RAG
                 relevant_docs = []
-                
-                # Pokud jde o pozdrav/neformální zprávu, odpovíme přímo bez RAG
+                general_knowledge_fallback = False
+
                 if intent == "greeting":
                     with st.spinner("Přemýšlím..."):
                         full_prompt = PROMPT_TEMPLATE_NO_CONTEXT.format(question=prompt)
                         response = llm.invoke(full_prompt)
                 else:
-                    # Technický dotaz - použijeme RAG
-                    with st.spinner("Prohledávám manuály na pozadí..."):
-                        vs = build_vectorstore()
-                        if vs is None:
-                            # Pokud není vektorová databáze, použijeme LLM bez kontextu
-                            st.warning("Znalostní báze není k dispozici. Odpovídám na základě obecných znalostí.")
-                            full_prompt = PROMPT_TEMPLATE_NO_CONTEXT.format(question=prompt)
-                            response = llm.invoke(full_prompt)
-                            relevant_docs = []
-                        else:
-                            # Najdeme 5 nejrelevantnějších pasáží v manuálu
-                            retriever = vs.as_retriever(search_kwargs={"k": 5})
-                            relevant_docs = retriever.invoke(prompt)
-                            
-                            # OŠETŘENÍ PRÁZDNÉHO KONTEXTU
-                            if relevant_docs and len(relevant_docs) > 0:
-                                context_text = "\n\n".join([f"Zdroj: {d.metadata.get('source', 'Neznámý zdroj')}\n{d.page_content}" for d in relevant_docs])
-                                full_prompt = PROMPT_TEMPLATE.format(context=context_text, question=prompt)
-                            else:
-                                # Pokud není kontext, použijeme prompt bez kontextu
-                                st.info("V manuálech nebyla nalezena relevantní informace. Odpovídám na základě obecných znalostí.")
+                    if not DOCS_DIR.exists() or not any(DOCS_DIR.iterdir()):
+                        st.warning("Složka 'docs/' je prázdná nebo neexistuje. Nejprve nahrajte manuály.")
+                        general_knowledge_fallback = True
+                        full_prompt = PROMPT_TEMPLATE_NO_CONTEXT.format(question=prompt)
+                        response = llm.invoke(full_prompt)
+                    else:
+                        with st.spinner("Prohledávám manuály na pozadí..."):
+                            vs = None
+                            try:
+                                vs = build_vectorstore()
+                            except Exception as e:
+                                st.error(f"Chyba embeddings/vektorové databáze: {e}")
+                                general_knowledge_fallback = True
+                                st.warning("Nepodařilo se prohledat lokální manuály, odpovídám z obecných znalostí.")
+                            if vs is None and general_knowledge_fallback:
                                 full_prompt = PROMPT_TEMPLATE_NO_CONTEXT.format(question=prompt)
+                                response = llm.invoke(full_prompt)
+                            elif vs is None:
+                                st.warning("Znalostní báze není k dispozici. Odpovídám na základě obecných znalostí.")
+                                full_prompt = PROMPT_TEMPLATE_NO_CONTEXT.format(question=prompt)
+                                response = llm.invoke(full_prompt)
+                            else:
+                                try:
+                                    retriever = vs.as_retriever(search_kwargs={"k": 5})
+                                    relevant_docs = retriever.invoke(prompt)
+                                except Exception:
+                                    relevant_docs = []
+                                    general_knowledge_fallback = True
                                 context_text = ""
-                            
-                            response = llm.invoke(full_prompt)
+                                if relevant_docs and len(relevant_docs) > 0:
+                                    try:
+                                        context_text = "\n\n".join([f"Zdroj: {d.metadata.get('source', 'Neznámý zdroj')}\n{d.page_content}" for d in relevant_docs])
+                                    except (IndexError, TypeError, AttributeError):
+                                        context_text = ""
+                                if context_text is None or not str(context_text).strip():
+                                    general_knowledge_fallback = True
+                                if general_knowledge_fallback or not context_text or not str(context_text).strip():
+                                    full_prompt = PROMPT_TEMPLATE_NO_CONTEXT.format(question=prompt)
+                                    st.warning("Nepodařilo se prohledat lokální manuály, odpovídám z obecných znalostí.")
+                                else:
+                                    full_prompt = PROMPT_TEMPLATE.format(context=context_text, question=prompt)
+                                response = llm.invoke(full_prompt)
 
                 # Ošetření odpovědi - zkontrolujeme, zda response a response.content existují
                 if response and hasattr(response, 'content') and response.content:
