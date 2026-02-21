@@ -427,7 +427,7 @@ def create_llm_instance(provider: str, api_key: str):
     
     try:
         if provider == "Google Gemini":
-            return ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=api_key)
+            return ChatGoogleGenerativeAI(model="gemini-1.5-flash-latest", google_api_key=api_key)
         elif provider == "OpenAI (ChatGPT)":
             # Pro OpenAI použijeme SecretStr pro správné typování
             return ChatOpenAI(model="gpt-4o-mini", api_key=SecretStr(api_key), temperature=0.7)
