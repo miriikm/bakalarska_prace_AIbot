@@ -867,6 +867,7 @@ def main():
     config = load_config()
     _google_oauth_check_and_login()
     if not st.session_state.get("connected"):
+        st.markdown('<meta name="referrer" content="no-referrer">', unsafe_allow_html=True)
         st.title("🧬 RAD-seq Asistent")
         st.success("Vítejte! Pro použití chatu se přihlaste pomocí Google účtu.")
         redirect_uri_used = _get_google_redirect_uri()
@@ -894,7 +895,7 @@ def main():
         if login_url:
             login_url_escaped = login_url.replace("&", "&amp;").replace('"', "&quot;")
             st.markdown(
-                f'<div style="display: flex; justify-content: center;"><a href="{login_url_escaped}" target="_self" rel="noreferrer" onclick="window.top.location.href=this.getAttribute(\'href\'); return false;" style="background-color: #4285f4; color: #fff; text-decoration: none; text-align: center; font-size: 16px; margin: 4px 2px; cursor: pointer; padding: 8px 12px; border-radius: 4px; display: flex; align-items: center;"><img src="https://lh3.googleusercontent.com/COxitqgJr1sJnIDe8-jiKhxDx1FrYbtRHKJ9z_hELisAlapwE9LUPh6fcXIfb5vwpbMl4xl9H9TRFPc5NOO8Sb3VSgIBrfRYvW6cUA" alt="Google logo" style="margin-right: 8px; width: 26px; height: 26px; background-color: white; border: 2px solid white; border-radius: 4px;">Sign in with Google</a></div>',
+                f'<div style="display: flex; justify-content: center;"><a href="{login_url_escaped}" target="_self" rel="noreferrer" referrerpolicy="no-referrer" onclick="window.top.location.href=this.getAttribute(\'href\'); return false;" style="background-color: #4285f4; color: #fff; text-decoration: none; text-align: center; font-size: 16px; margin: 4px 2px; cursor: pointer; padding: 8px 12px; border-radius: 4px; display: flex; align-items: center;"><img src="https://lh3.googleusercontent.com/COxitqgJr1sJnIDe8-jiKhxDx1FrYbtRHKJ9z_hELisAlapwE9LUPh6fcXIfb5vwpbMl4xl9H9TRFPc5NOO8Sb3VSgIBrfRYvW6cUA" alt="Google logo" style="margin-right: 8px; width: 26px; height: 26px; background-color: white; border: 2px solid white; border-radius: 4px;">Sign in with Google</a></div>',
                 unsafe_allow_html=True,
             )
         else:
