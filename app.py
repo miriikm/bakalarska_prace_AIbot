@@ -20,6 +20,7 @@ import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
+from openai import OpenAI
 
 os.environ["GOOGLE_API_VERSION"] = "v1"
 
@@ -34,10 +35,12 @@ HISTORY_FILE = _SCRIPT_DIR / "history.json"
 CONFIG_FILE = _SCRIPT_DIR / "config.yaml"
 
 def _env_api_key(provider: str) -> str:
-    if provider == "Google Gemini":
+    if provider in ("Google Gemini", "Gemini 2.0 Flash"):
         return (os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY") or "").strip()
     if provider == "OpenAI (ChatGPT)":
         return (os.environ.get("OPENAI_API_KEY") or "").strip()
+    if provider == "GPT-4o (GitHub)":
+        return (os.environ.get("GITHUB_TOKEN") or "").strip()
     return ""
 
 def _get_global_api_key(provider: str) -> str:
@@ -46,10 +49,12 @@ def _get_global_api_key(provider: str) -> str:
         return from_env
     try:
         if hasattr(st, "secrets"):
-            if provider == "Google Gemini":
+            if provider in ("Google Gemini", "Gemini 2.0 Flash"):
                 return (st.secrets.get("GOOGLE_API_KEY") or st.secrets.get("gemini_api_key") or "").strip()
             if provider == "OpenAI (ChatGPT)":
                 return (st.secrets.get("OPENAI_API_KEY") or "").strip()
+            if provider == "GPT-4o (GitHub)":
+                return (st.secrets.get("GITHUB_TOKEN") or "").strip()
     except Exception:
         pass
     return ""
@@ -72,10 +77,27 @@ def _resolve_api_key(provider: str, user_key: str) -> tuple[str, bool]:
         return user_val, False
     if global_key:
         return global_key, True
-    if provider == "Google Gemini":
+    if provider in ("Google Gemini", "Gemini 2.0 Flash"):
         effective = _get_default_gemini_api_key()
         return effective, bool(effective)
     return "", False
+
+
+def get_github_model_response(prompt, context):
+    client = OpenAI(
+        base_url="https://models.inference.ai.azure.com",
+        api_key=st.secrets["GITHUB_TOKEN"],
+    )
+    full_prompt = f"Kontext z manuálů: {context}\n\nOtázka: {prompt}"
+    response = client.chat.completions.create(
+        messages=[
+            {"role": "system", "content": "Jsi odborník na populační genetiku."},
+            {"role": "user", "content": full_prompt}
+        ],
+        model="gpt-4o",
+        temperature=0.2
+    )
+    return response.choices[0].message.content
 
 # --- SPRÁVA KONFIGURACE A AUTENTIZACE ---
 def _default_config() -> dict:
@@ -673,7 +695,7 @@ def main():
     # Načtení API klíče a poskytovatele z profilu uživatele
     usernames = config.get("credentials", {}).get("usernames", {})
     stored_api_key = usernames.get(username, {}).get("api_key", "") if username in usernames else ""
-    stored_provider = usernames.get(username, {}).get("ai_provider", "Google Gemini") if username in usernames else "Google Gemini"
+    stored_provider = usernames.get(username, {}).get("ai_provider", "Gemini 2.0 Flash") if username in usernames else "Gemini 2.0 Flash"
     
     # Inicializace session state pro zprávy a aktuální konverzaci
     if "messages" not in st.session_state:
@@ -693,11 +715,16 @@ def main():
         
         # Zobrazení aktivního AI modelu
         current_provider = st.session_state.get("ai_provider", stored_provider)
-        provider_icon = "🤖" if current_provider == "Google Gemini" else "💬"
+        if current_provider not in ("Gemini 2.0 Flash", "GPT-4o (GitHub)"):
+            st.session_state["ai_provider"] = "Gemini 2.0 Flash"
+            current_provider = "Gemini 2.0 Flash"
+        provider_icon = "🤖" if current_provider == "Gemini 2.0 Flash" else "💬"
         st.caption(f"{provider_icon} **Aktivní model:** {current_provider}")
         _uk = st.session_state.get("api_key_input", "") or stored_api_key
         _eff, _from_secrets = _resolve_api_key(current_provider, _uk)
-        if not _eff:
+        if current_provider == "GPT-4o (GitHub)":
+            st.caption("Token: z secrets" if _eff else "GitHub token: nezadán")
+        elif not _eff:
             st.caption("API klíč: nezadán")
         else:
             st.caption("API klíč: z Nastavení" if not _from_secrets else ("API klíč: z .env" if (_eff and _env_api_key(current_provider) == _eff) else "API klíč: z secrets/prostředí"))
@@ -900,7 +927,7 @@ def main():
         
         with st.expander("⚙️ Nastavení a Profil", expanded=False):
             # Výběr poskytovatele AI
-            provider_options = ["Google Gemini", "OpenAI (ChatGPT)"]
+            provider_options = ["Gemini 2.0 Flash", "GPT-4o (GitHub)"]
             selected_provider = st.selectbox(
                 "Vyberte poskytovatele AI",
                 options=provider_options,
@@ -921,35 +948,31 @@ def main():
             
             st.divider()
             
-            _eff_key, using_global_key = _resolve_api_key(selected_provider, st.session_state.get("api_key_input", "") or stored_api_key)
-            if using_global_key and _eff_key:
-                st.info("Aktuálně se používá globální API klíč administrátora.")
-            
-            api_key_label = "Google API Key" if selected_provider == "Google Gemini" else "OpenAI API Key"
-            api_key_help = f"Zadejte nebo upravte svůj {api_key_label}. Uloží se do config.yaml do vašeho profilu a zůstane i po odhlášení."
-            
-            if stored_api_key and not using_global_key:
-                st.caption(f"✅ V profilu máte uložen vlastní API klíč pro {selected_provider}.")
-            
-            api_key_input = st.text_input(
-                api_key_label, 
-                value=st.session_state["api_key_input"],
-                type="password",
-                help=api_key_help,
-                key="api_key_input_field"
-            )
-            
-            # Uložíme do session_state
-            if api_key_input:
-                st.session_state["api_key_input"] = api_key_input
-            
-            # Kontrola, zda má uživatel správný klíč pro vybraný poskytovatele
-            if selected_provider == "OpenAI (ChatGPT)" and (not api_key_input or not api_key_input.startswith("sk-")):
-                if not stored_api_key or not stored_api_key.startswith("sk-"):
-                    st.warning("⚠️ Pro použití OpenAI (ChatGPT) musíte zadat platný OpenAI API klíč (začíná na 'sk-').")
-            
-            # Uložení API klíče do profilu
-            if api_key_input and api_key_input != stored_api_key:
+            _uk_inner = st.session_state.get("api_key_input", "") or stored_api_key
+            _eff_key, using_global_key = _resolve_api_key(selected_provider, _uk_inner)
+            api_key_input = _uk_inner
+            if selected_provider == "GPT-4o (GitHub)":
+                if _eff_key:
+                    st.info("Používá se GitHub token z .streamlit/secrets.toml (GITHUB_TOKEN).")
+                else:
+                    st.warning("⚠️ Pro GPT-4o (GitHub) nastavte GITHUB_TOKEN v .streamlit/secrets.toml.")
+            else:
+                if using_global_key and _eff_key:
+                    st.info("Aktuálně se používá globální API klíč administrátora.")
+                api_key_label = "Google API Key" if selected_provider == "Gemini 2.0 Flash" else "OpenAI API Key"
+                api_key_help = f"Zadejte nebo upravte svůj {api_key_label}. Uloží se do config.yaml do vašeho profilu a zůstane i po odhlášení."
+                if stored_api_key and not using_global_key:
+                    st.caption(f"✅ V profilu máte uložen vlastní API klíč pro {selected_provider}.")
+                api_key_input = st.text_input(
+                    api_key_label,
+                    value=st.session_state["api_key_input"],
+                    type="password",
+                    help=api_key_help,
+                    key="api_key_input_field"
+                )
+                if api_key_input:
+                    st.session_state["api_key_input"] = api_key_input
+            if selected_provider != "GPT-4o (GitHub)" and st.session_state.get("api_key_input") != stored_api_key:
                 if st.button("💾 Uložit API klíč do profilu", use_container_width=True):
                     usernames[username]["api_key"] = api_key_input
                     config["credentials"]["usernames"] = usernames
@@ -1048,7 +1071,7 @@ def main():
         st.caption(f"📝 {st.session_state['conversation_title']}")
     
     # Dynamický info text podle poskytovatele
-    provider_text = "Gemini" if ai_provider == "Google Gemini" else "ChatGPT"
+    provider_text = "Gemini" if ai_provider == "Gemini 2.0 Flash" else "GPT-4o (GitHub)"
     st.info(f"Vyhledávání v manuálech probíhá lokálně (bez limitů). {provider_text} se používá pouze pro generování textu.")
     
     if not st.session_state["messages"]:
@@ -1080,16 +1103,15 @@ def main():
     if prompt := st.chat_input("Zadejte svůj dotaz (např. filtrování VCF nebo demultiplexing):"):
         user_key = st.session_state.get("api_key_input", "") or stored_api_key
         effective_key, from_secrets = _resolve_api_key(ai_provider, user_key)
-        if not effective_key:
-            provider_name = "Google API klíč" if ai_provider == "Google Gemini" else "OpenAI API klíč"
+        if ai_provider == "GPT-4o (GitHub)":
+            if not effective_key:
+                st.warning("⚠️ Pro GPT-4o (GitHub) nastavte GITHUB_TOKEN v .streamlit/secrets.toml.")
+                st.stop()
+        elif not effective_key:
+            provider_name = "Google API klíč" if ai_provider == "Gemini 2.0 Flash" else "OpenAI API klíč"
             st.warning(f"⚠️ Prosím, zadejte {provider_name} v sekci 'Nastavení' v sidebaru, nebo ho uložte do svého profilu.")
             st.stop()
         api_key = effective_key
-        
-        # Kontrola, zda má uživatel správný klíč pro vybraný poskytovatele
-        if ai_provider == "OpenAI (ChatGPT)" and not api_key.startswith("sk-"):
-            st.warning("⚠️ Pro použití OpenAI (ChatGPT) musíte zadat platný OpenAI API klíč (začíná na 'sk-'). Zadejte ho v sekci 'Nastavení'.")
-            st.stop()
         
         st.session_state["messages"].append({"role": "user", "content": prompt})
         try:
@@ -1112,13 +1134,13 @@ def main():
                 intent = classify_user_intent(prompt, api_key, ai_provider)
                 gemini_model = None
                 llm = None
-                if ai_provider == "Google Gemini":
+                if ai_provider == "Gemini 2.0 Flash":
                     gemini_model = get_gemini_model(api_key)
                     if gemini_model is None:
                         st.error("Chyba při inicializaci Gemini modelu. Zkontrolujte prosím API klíč.")
                         st.session_state["messages"].pop()
                         st.stop()
-                else:
+                elif ai_provider != "GPT-4o (GitHub)":
                     llm = create_llm_instance(ai_provider, api_key)
                     if llm is None:
                         st.error("Chyba při inicializaci modelu. Zkontrolujte prosím API klíč.")
@@ -1175,7 +1197,15 @@ def main():
                     streamed = False
                 else:
                     with st.spinner("Hledám v manuálech a připravuji odpověď..." if intent != "greeting" else "Přemýšlím..."):
-                        if ai_provider == "Google Gemini" and gemini_model is not None:
+                        if ai_provider == "GPT-4o (GitHub)":
+                            try:
+                                response_content = get_github_model_response(prompt, context_text if context_text else "")
+                                streamed = False
+                            except Exception as e:
+                                st.error(f"Chyba GitHub API: {e}")
+                                response_content = ""
+                                streamed = False
+                        elif ai_provider == "Gemini 2.0 Flash" and gemini_model is not None:
                             response_content = get_gemini_response(gemini_model, full_prompt)
                             streamed = False
                         elif llm is not None:

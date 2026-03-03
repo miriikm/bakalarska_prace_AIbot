@@ -13,3 +13,4 @@ pypdf
 beautifulsoup4
 pyyaml
 requests
+openai
