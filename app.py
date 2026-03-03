@@ -7,7 +7,7 @@ import secrets
 from datetime import datetime
 from pathlib import Path
 from pydantic import SecretStr
-from database import get_user_session, save_user_session
+from database import get_chat_history, save_chat_to_db
 
 from dotenv import load_dotenv
 
@@ -1053,11 +1053,18 @@ def main():
     
     if not st.session_state["messages"]:
         try:
-            remote_history = get_user_session(username)
+            remote_history = get_chat_history(username)
         except Exception:
-            remote_history = None
-        if isinstance(remote_history, list):
-            st.session_state["messages"] = remote_history
+            remote_history = []
+        if isinstance(remote_history, list) and remote_history:
+            normalized = []
+            for item in remote_history:
+                if isinstance(item, dict):
+                    content = item.get("content") or item.get("message", "")
+                    role = item.get("role", "user")
+                    normalized.append({"role": role, "content": content})
+            if normalized:
+                st.session_state["messages"] = normalized
 
     for msg in st.session_state["messages"]:
         role = msg.get("role", "user")
@@ -1085,6 +1092,10 @@ def main():
             st.stop()
         
         st.session_state["messages"].append({"role": "user", "content": prompt})
+        try:
+            save_chat_to_db(username, prompt, "user")
+        except Exception:
+            pass
         with st.chat_message("user"):
             st.write(prompt)
         
@@ -1180,7 +1191,10 @@ def main():
                     st.markdown(response_content)
                 
                 st.session_state["messages"].append({"role": "assistant", "content": response_content})
-                
+                try:
+                    save_chat_to_db(username, response_content, "assistant")
+                except Exception:
+                    pass
                 timestamp = datetime.now().isoformat()
                 save_history(
                     username,
@@ -1189,10 +1203,6 @@ def main():
                     st.session_state["messages"],
                     timestamp
                 )
-                try:
-                    save_user_session(username, st.session_state["messages"])
-                except Exception:
-                    pass
                 
                 # Zobrazíme zdroje pouze pokud byly použity (technický dotaz s RAG)
                 if intent == "technical" and relevant_docs and len(relevant_docs) > 0:
