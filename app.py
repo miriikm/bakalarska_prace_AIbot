@@ -4,6 +4,8 @@ import shutil
 import json
 import yaml
 import secrets
+import io
+import base64
 from datetime import datetime
 from pathlib import Path
 from pydantic import SecretStr
@@ -21,6 +23,7 @@ from google.generativeai.types import HarmCategory, HarmBlockThreshold
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from openai import OpenAI
+import PIL.Image
 
 os.environ["GOOGLE_API_VERSION"] = "v1"
 
@@ -83,19 +86,27 @@ def _resolve_api_key(provider: str, user_key: str) -> tuple[str, bool]:
     return "", False
 
 
-def get_github_model_response(prompt, context):
+def get_github_model_response(prompt, context, image_bytes: bytes | None = None, image_type: str = "image/jpeg"):
     client = OpenAI(
         base_url="https://models.inference.ai.azure.com",
         api_key=st.secrets["GITHUB_TOKEN"],
     )
-    sys = "Jsi vědecký asistent. Při odpovídání rozlišuj původ informací: pokud informaci čerpáš z poskytnutého kontextu (manuálu), vlož za větu nebo odstavec značku [MANUAL]; pokud ze svých znalostí, vlož [AI]. Příklad: PCA analýza slouží k vizualizaci genetických struktur [MANUAL]. Je to jedna z nejpoužívanějších metod v bioinformatice [AI]."
+    sys = "Jsi vědecký asistent. Při odpovídání rozlišuj původ informací: pokud informaci čerpáš z poskytnutého kontextu (manuálu), vlož za větu nebo odstavec značku [MANUAL]; pokud ze svých znalostí, vlož [AI]. Příklad: PCA analýza slouží k vizualizaci genetických struktur [MANUAL]. Je to jedna z nejpoužívanějších metod v bioinformatice [AI]. Pokud uživatel nahraje obrázek, propoj informace z něj s manuály speciationgenomics. Pokud jde o graf (např. PCA nebo Admixture), popiš, co v něm vidíš."
     if not (context or "").strip():
         sys += " Nemáš k dispozici kontext z manuálu, označuj vše jako [AI]."
     full_prompt = f"Kontext z manuálů: {context}\n\nOtázka: {prompt}"
+    if image_bytes:
+        base64_image = base64.b64encode(image_bytes).decode("utf-8")
+        user_content = [
+            {"type": "text", "text": full_prompt},
+            {"type": "image_url", "image_url": {"url": f"data:{image_type};base64,{base64_image}"}}
+        ]
+    else:
+        user_content = full_prompt
     response = client.chat.completions.create(
         messages=[
             {"role": "system", "content": sys},
-            {"role": "user", "content": full_prompt}
+            {"role": "user", "content": user_content}
         ],
         model="gpt-4o",
         temperature=0.2
@@ -518,9 +529,13 @@ def get_gemini_model(api_key: str):
     except Exception:
         return None
 
-def get_gemini_response(model, full_prompt: str) -> str:
+def get_gemini_response(model, full_prompt: str, image_bytes: bytes | None = None) -> str:
     try:
-        response = model.generate_content(full_prompt, safety_settings=GEMINI_SAFETY_SETTINGS)
+        if image_bytes:
+            img = PIL.Image.open(io.BytesIO(image_bytes))
+            response = model.generate_content([full_prompt, img], safety_settings=GEMINI_SAFETY_SETTINGS)
+        else:
+            response = model.generate_content(full_prompt, safety_settings=GEMINI_SAFETY_SETTINGS)
         if response and hasattr(response, "text") and response.text:
             return response.text.strip()
         return "Model vrátil prázdnou odpověď."
@@ -552,6 +567,7 @@ PROMPT_TEMPLATE = """Jsi vědecký asistent. Při odpovídání rozlišuj původ
 - Pokud informaci čerpáš z poskytnutého kontextu (manuálu), vlož za danou větu nebo odstavec značku [MANUAL].
 - Pokud informaci doplňuješ ze svých obecných znalostí, vlož značku [AI].
 Příklad: PCA analýza slouží k vizualizaci genetických struktur [MANUAL]. Je to jedna z nejpoužívanějších metod v bioinformatice [AI].
+Pokud uživatel nahraje obrázek, propoj informace z něj s manuály speciationgenomics. Pokud jde o graf (např. PCA nebo Admixture), popiš, co v něm vidíš.
 
 KONTEXT Z MANUÁLU:
 {context}
@@ -559,6 +575,7 @@ KONTEXT Z MANUÁLU:
 Otázka: {question}"""
 
 PROMPT_TEMPLATE_NO_CONTEXT = """Jsi vědecký asistent. Nemáš k dispozici kontext z manuálu, označuj vše jako [AI].
+Pokud uživatel nahraje obrázek, popiš, co v něm vidíš (např. graf PCA nebo Admixture). Propoj s manuály speciationgenomics, pokud můžeš.
 Uživatel se ptá na: {question}. Odpověz ze svých obecných znalostí o genetice a u každé věty/odstavce použij [AI]."""
 
 def classify_user_intent(prompt: str, api_key: str, provider: str = "Google Gemini") -> str:
@@ -1109,7 +1126,12 @@ def main():
             with st.chat_message("assistant"):
                 st.markdown(_format_citations(content))
     
-    # Vstupní pole pro novou otázku
+    uploaded_file = st.file_uploader("Vlož obrázek pro analýzu (graf, schéma...)", type=["png", "jpg", "jpeg"])
+    if uploaded_file:
+        st.session_state["_pending_image_bytes"] = uploaded_file.getvalue()
+        st.session_state["_pending_image_type"] = uploaded_file.type or "image/jpeg"
+        st.image(uploaded_file, caption="Nahraný obrázek", use_container_width=True)
+    
     if prompt := st.chat_input("Zadejte svůj dotaz (např. filtrování VCF nebo demultiplexing):"):
         user_key = st.session_state.get("api_key_input", "") or stored_api_key
         effective_key, from_secrets = _resolve_api_key(ai_provider, user_key)
@@ -1123,6 +1145,8 @@ def main():
             st.stop()
         api_key = effective_key
         
+        pending_image_bytes = st.session_state.pop("_pending_image_bytes", None)
+        pending_image_type = st.session_state.pop("_pending_image_type", "image/jpeg")
         st.session_state["messages"].append({"role": "user", "content": prompt})
         try:
             save_chat_to_db(username, prompt, "user")
@@ -1130,6 +1154,8 @@ def main():
             pass
         with st.chat_message("user"):
             st.write(prompt)
+            if pending_image_bytes:
+                st.image(io.BytesIO(pending_image_bytes), caption="Nahraný obrázek", use_container_width=True)
         
         is_new_conversation = st.session_state["current_conversation_id"] is None
         if is_new_conversation:
@@ -1211,14 +1237,17 @@ def main():
                     with st.spinner("Hledám v manuálech a připravuji odpověď..." if intent != "greeting" else "Přemýšlím..."):
                         if ai_provider == "GPT-4o (GitHub)":
                             try:
-                                response_content = get_github_model_response(prompt, context_text if context_text else "")
+                                response_content = get_github_model_response(
+                                    prompt, context_text if context_text else "",
+                                    image_bytes=pending_image_bytes, image_type=pending_image_type or "image/jpeg"
+                                )
                                 streamed = False
                             except Exception as e:
                                 st.error(f"Chyba GitHub API: {e}")
                                 response_content = ""
                                 streamed = False
                         elif ai_provider == "Gemini 2.0 Flash" and gemini_model is not None:
-                            response_content = get_gemini_response(gemini_model, full_prompt)
+                            response_content = get_gemini_response(gemini_model, full_prompt, image_bytes=pending_image_bytes)
                             streamed = False
                         elif llm is not None:
                             response_content, streamed = _stream_or_invoke(llm, full_prompt)
