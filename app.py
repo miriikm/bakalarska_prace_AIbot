@@ -867,6 +867,12 @@ def main():
     config = load_config()
     _google_oauth_check_and_login()
     if not st.session_state.get("connected"):
+        login_url = _google_oauth_login_url()
+        if st.session_state.get("_google_login_redirect") and login_url:
+            st.session_state.pop("_google_login_redirect", None)
+            st.info("Přesměrování na Google…")
+            st.markdown(f'<meta http-equiv="refresh" content="0;url={login_url}">', unsafe_allow_html=True)
+            return
         st.title("🧬 RAD-seq Asistent")
         st.success("Vítejte! Pro použití chatu se přihlaste pomocí Google účtu.")
         redirect_uri_used = _get_google_redirect_uri()
@@ -890,10 +896,12 @@ def main():
 3. **Nový klient** – Pokud nic nepomůže: v GCP vytvořte **nový** OAuth 2.0 Client ID (Web application), přidejte tam jen vaši Streamlit URL (obě varianty), použijte nový client_id a client_secret v Secrets.
             """)
             st.code(f"Použitý redirect_uri (zkopírujte do GCP):\n{redirect_uri_used}", language=None)
-        login_url = _google_oauth_login_url()
         if login_url:
+            if st.button("Sign in with Google", type="primary", use_container_width=False):
+                st.session_state["_google_login_redirect"] = login_url
+                st.rerun()
             st.markdown(
-                f'<div style="display: flex; justify-content: center;"><a href="{login_url}" target="_self" rel="noreferrer" style="background-color: #4285f4; color: #fff; text-decoration: none; text-align: center; font-size: 16px; margin: 4px 2px; cursor: pointer; padding: 8px 12px; border-radius: 4px; display: flex; align-items: center;"><img src="https://lh3.googleusercontent.com/COxitqgJr1sJnIDe8-jiKhxDx1FrYbtRHKJ9z_hELisAlapwE9LUPh6fcXIfb5vwpbMl4xl9H9TRFPc5NOO8Sb3VSgIBrfRYvW6cUA" alt="Google logo" style="margin-right: 8px; width: 26px; height: 26px; background-color: white; border: 2px solid white; border-radius: 4px;">Sign in with Google</a></div>',
+                '<div style="display: flex; justify-content: center; margin-top: 8px;"><img src="https://lh3.googleusercontent.com/COxitqgJr1sJnIDe8-jiKhxDx1FrYbtRHKJ9z_hELisAlapwE9LUPh6fcXIfb5vwpbMl4xl9H9TRFPc5NOO8Sb3VSgIBrfRYvW6cUA" alt="Google" style="width: 26px; height: 26px; border-radius: 4px;"></div>',
                 unsafe_allow_html=True,
             )
         else:
