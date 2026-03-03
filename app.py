@@ -875,14 +875,21 @@ def main():
                 st.warning("Používáte redirect_uri pro localhost. Na webu (Streamlit Cloud) přidejte do Secrets pod [firebase] položku **redirect_uri** s URL vaší aplikace (např. `https://vase-app.streamlit.app/`) a stejnou URL v GCP Console → Credentials → OAuth 2.0 Client ID → Authorized redirect URIs.")
             except Exception:
                 pass
-        with st.expander("Proč vidím 403 od Google?"):
+        with st.expander("Proč vidím 403 od Google? (localhost funguje, web ne)"):
             st.markdown("""
-1. **Test users** – V GCP: APIs & Services → OAuth consent screen → Test users → přidejte **přesně ten Google účet**, kterým se přihlašujete. V režimu Testing smí přihlášení jen tyto účty (403 = účet není v seznamu).
-2. **Redirect URI** – V GCP: Credentials → váš OAuth 2.0 Client ID (Web) → v **Authorized redirect URIs** musí být **přesně** stejná URL jako „Použitý redirect_uri“ níže. Zkuste s lomítkem i bez (`https://xxx.streamlit.app` a `https://xxx.streamlit.app/`).
-3. **V Secrets na webu** – V nastavení aplikace → Secrets přidejte pod `[firebase]` řádek: `redirect_uri = "https://vase-app.streamlit.app/"` (vaše skutečná URL).
-4. **403 hned po otevření** – Pokud 403 vidíte dřív, než kliknete na Google, jde o Streamlit: v nastavení aplikace na Streamlit Cloud zkontrolujte, že je aplikace veřejná.
+**Nejčastější příčiny 403 při stejných URL:**
+
+1. **Typ klienta** – V GCP → Credentials musí být OAuth klient typu **„Web application“** (ne Desktop). U Web application musí být vyplněno:
+   - **Authorized JavaScript origins:** přidejte `https://vase-app.streamlit.app` (vaše URL, bez lomítka)
+   - **Authorized redirect URIs:** přidejte **obě** varianty (s i bez lomítka), aby jedna seděla:
+     - `https://vase-app.streamlit.app`
+     - `https://vase-app.streamlit.app/`
+
+2. **Přesná shoda** – Hodnota „Použitý redirect_uri“ níže musí být **znak od znaku** stejná jako jedna z URI v GCP. Zkopírujte ji a vložte do Authorized redirect URIs v GCP.
+
+3. **Nový klient** – Pokud nic nepomůže: v GCP vytvořte **nový** OAuth 2.0 Client ID (Web application), přidejte tam jen vaši Streamlit URL (obě varianty), použijte nový client_id a client_secret v Secrets.
             """)
-            st.code(f"Použitý redirect_uri: {redirect_uri_used}", language=None)
+            st.code(f"Použitý redirect_uri (zkopírujte do GCP):\n{redirect_uri_used}", language=None)
         login_url = _google_oauth_login_url()
         if login_url:
             st.markdown(
