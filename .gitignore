@@ -24,6 +24,7 @@ history.json
 # Konfigurace s citlivými údaji
 config.yaml
 .env
+google_credentials.json
 
 # IDE
 .vscode/

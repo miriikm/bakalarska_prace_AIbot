@@ -12,6 +12,7 @@ from pydantic import SecretStr
 from database import get_chat_history, save_chat_to_db
 
 from dotenv import load_dotenv
+from streamlit_google_auth import Authenticate as GoogleAuthenticate
 
 import streamlit_authenticator as stauth
 
@@ -36,6 +37,46 @@ FAISS_INDEX_STATIC = _SCRIPT_DIR / "faiss_index_static"
 FAISS_INDEX_DIR = _SCRIPT_DIR / "faiss_index_local"
 HISTORY_FILE = _SCRIPT_DIR / "history.json"
 CONFIG_FILE = _SCRIPT_DIR / "config.yaml"
+
+def _get_firebase_secrets():
+    try:
+        if hasattr(st, "secrets") and isinstance(st.secrets.get("firebase"), dict):
+            return st.secrets["firebase"]
+    except Exception:
+        pass
+    return {}
+
+
+def _get_google_authenticator():
+    firebase = _get_firebase_secrets()
+    creds_path = _SCRIPT_DIR / "google_credentials.json"
+    try:
+        if hasattr(st, "secrets") and st.secrets.get("GOOGLE_CREDENTIALS_PATH"):
+            creds_path = Path(st.secrets["GOOGLE_CREDENTIALS_PATH"])
+            if not creds_path.is_absolute():
+                creds_path = _SCRIPT_DIR / creds_path
+    except Exception:
+        pass
+    redirect_uri = firebase.get("redirect_uri") or os.environ.get("GOOGLE_REDIRECT_URI") or "http://localhost:8501"
+    try:
+        if hasattr(st, "secrets") and st.secrets.get("GOOGLE_REDIRECT_URI"):
+            redirect_uri = st.secrets["GOOGLE_REDIRECT_URI"]
+    except Exception:
+        pass
+    cookie_name = firebase.get("cookie_name", "radseq_google_auth")
+    cookie_key = firebase.get("key") or firebase.get("cookie_key") or secrets.token_hex(16)
+    try:
+        if hasattr(st, "secrets") and st.secrets.get("GOOGLE_COOKIE_KEY"):
+            cookie_key = st.secrets["GOOGLE_COOKIE_KEY"]
+    except Exception:
+        pass
+    return GoogleAuthenticate(
+        secret_credentials_path=str(creds_path),
+        redirect_uri=redirect_uri,
+        cookie_name=cookie_name,
+        cookie_key=cookie_key,
+        cookie_expiry_days=30.0,
+    )
 
 def _env_api_key(provider: str) -> str:
     if provider in ("Google Gemini", "Gemini 2.0 Flash"):
@@ -694,51 +735,63 @@ def main():
             pass
         st.session_state["_cache_cleared_at_start"] = True
     config = load_config()
-    
-    # Vytvoření authenticatoru JEDNOU pomocí cache (aby se předešlo duplicitním klíčům)
-    authenticator = get_authenticator(config)
-    
-    # Inicializace session state pro autentizaci
-    if "authentication_status" not in st.session_state:
-        st.session_state["authentication_status"] = None
-    if "username" not in st.session_state:
-        st.session_state["username"] = None
-    if "name" not in st.session_state:
-        st.session_state["name"] = None
-    if "user_email" not in st.session_state:
-        st.session_state["user_email"] = None
-    
-    # Pokud není uživatel přihlášen, zobrazíme přihlášení/registraci
-    if not st.session_state.get("authentication_status"):
+    google_auth = None
+    try:
+        google_auth = _get_google_authenticator()
+        google_auth.check_authentification()
+    except Exception as e:
+        if not st.session_state.get("connected"):
+            st.title("🧬 RAD-seq Asistent")
+            st.error("Google přihlášení není nakonfigurováno. Přidejte soubor google_credentials.json (OAuth 2.0 Client ID z GCP Console) do kořene projektu.")
+            st.code(str(e))
+            return
+    if not st.session_state.get("connected"):
         st.title("🧬 RAD-seq Asistent")
-        show_login_registration_tabs(config, authenticator)
+        st.success("Vítejte! Pro použití chatu se přihlaste pomocí Google účtu.")
+        st.markdown("Přihlášení propojí vaši identitu s historií chatu v Cloudflare D1 (podle e-mailu).")
+        if google_auth:
+            try:
+                auth_url = google_auth.get_authorization_url()
+                st.link_button("🔐 Login with Google", url=auth_url, type="primary", use_container_width=True)
+                st.caption("Po kliknutí budete přesměrováni na Google. Po přihlášení se vrátíte sem.")
+            except Exception as e:
+                st.error("Chyba při zobrazení přihlášení. Zkontrolujte google_credentials.json a autorizované URI v GCP Console.")
+                st.code(str(e))
         return
-    
-    # Uživatel je přihlášen - zobrazíme chatbot UI
-    username = st.session_state["username"]
-    user_email = st.session_state["user_email"]
-    name = st.session_state["name"]
-    
-    # Načtení API klíče a poskytovatele z profilu uživatele
+    user_info = st.session_state.get("user_info", {})
+    name = user_info.get("name", "")
+    user_email = user_info.get("email", "") or ""
+    photo_url = user_info.get("picture")
+    st.session_state["name"] = name
+    st.session_state["user_email"] = user_email
+    st.session_state["username"] = user_email
+    st.session_state["user_photo_url"] = photo_url
+    username = user_email
     usernames = config.get("credentials", {}).get("usernames", {})
+    if user_email and user_email not in usernames:
+        usernames[user_email] = {"name": name, "email": user_email, "api_key": "", "ai_provider": "Gemini 2.0 Flash"}
+        config["credentials"]["usernames"] = usernames
+        save_config(config)
     stored_api_key = usernames.get(username, {}).get("api_key", "") if username in usernames else ""
     stored_provider = usernames.get(username, {}).get("ai_provider", "Gemini 2.0 Flash") if username in usernames else "Gemini 2.0 Flash"
-    
-    # Inicializace session state pro zprávy a aktuální konverzaci
     if "messages" not in st.session_state:
         st.session_state["messages"] = []
     if "current_conversation_id" not in st.session_state:
         st.session_state["current_conversation_id"] = None
     if "conversation_title" not in st.session_state:
         st.session_state["conversation_title"] = None
-    
-    # Načtení historie pro uživatele (podle username)
     user_history = load_history(username)
 
     with st.sidebar:
-        # HORNÍ ČÁST SIDEBARU - Info o uživateli a hlavní akce
-        st.markdown(f"**Přihlášen:** {name or username}")
-        st.caption(f"@{username}")
+        if photo_url:
+            st.image(photo_url, width=80)
+        st.markdown(f"**{name or user_email}**")
+        st.caption(user_email)
+        if st.button("🚪 Odhlásit se", key="google_logout", use_container_width=True) and google_auth:
+            google_auth.logout()
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
+            st.rerun()
         
         # Zobrazení aktivního AI modelu
         current_provider = st.session_state.get("ai_provider", stored_provider)
@@ -767,30 +820,6 @@ def main():
         if st.button("🔄 Nouzový reset aplikace", use_container_width=True, help="Vymaže session a restartuje aplikaci při zaseknutí."):
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
-            st.rerun()
-        
-        # Logout tlačítko
-        try:
-            authenticator.logout('🚪 Odhlásit se', 'sidebar')
-            # Pokud authenticator.logout() nastavil logout flag, vyčistíme session_state
-            if st.session_state.get("logout"):
-                # Úplné vymazání session_state - kompletní vyčištění relace
-                for key in list(st.session_state.keys()):
-                    del st.session_state[key]
-                st.rerun()
-            # Kontrola po logout - pokud není přihlášen, přesměrujeme na úvodní obrazovku
-            if not st.session_state.get("authentication_status"):
-                st.rerun()
-        except Exception:
-            # Pokud authenticator.logout() způsobí chybu, použijeme vlastní tlačítko
-            if st.button("🚪 Odhlásit se", use_container_width=True, type="secondary", key="logout_button"):
-                # Úplné vymazání session_state - kompletní vyčištění relace
-                for key in list(st.session_state.keys()):
-                    del st.session_state[key]
-                st.rerun()
-        
-        # Kontrola po logout - pokud není přihlášen, přesměrujeme na úvodní obrazovku
-        if not st.session_state.get("authentication_status"):
             st.rerun()
 
         st.divider()
