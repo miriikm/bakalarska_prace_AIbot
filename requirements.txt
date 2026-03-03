@@ -1,6 +1,5 @@
 streamlit
 streamlit-authenticator
-streamlit-google-auth
 python-dotenv
 langchain
 langchain-community

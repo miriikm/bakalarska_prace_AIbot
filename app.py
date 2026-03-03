@@ -12,7 +12,7 @@ from pydantic import SecretStr
 from database import get_chat_history, save_chat_to_db
 
 from dotenv import load_dotenv
-from streamlit_google_auth import Authenticate as GoogleAuthenticate
+import streamlit.components.v1 as components
 
 import streamlit_authenticator as stauth
 
@@ -47,36 +47,69 @@ def _get_firebase_secrets():
     return {}
 
 
-def _get_google_authenticator():
+def _firebase_login_html(api_key: str, auth_domain: str, project_id: str, redirect_uri: str) -> str:
+    redirect_uri_esc = json.dumps(redirect_uri)
+    api_key_esc = json.dumps(api_key)
+    auth_domain_esc = json.dumps(auth_domain)
+    project_id_esc = json.dumps(project_id)
+    return f"""
+<!DOCTYPE html>
+<html>
+<head>
+  <script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-auth-compat.js"></script>
+</head>
+<body style="font-family:sans-serif;padding:20px;margin:0;">
+  <button id="googleBtn" style="display:flex;align-items:center;gap:8px;padding:10px 16px;background:#4285f4;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:16px;">
+    <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" width="20" height="20" alt="Google"/>
+    Přihlásit přes Google
+  </button>
+  <p id="status" style="margin-top:12px;font-size:14px;color:#666;"></p>
+  <script>
+    const redirectUri = {redirect_uri_esc};
+    const firebaseConfig = {{
+      apiKey: {api_key_esc},
+      authDomain: {auth_domain_esc},
+      projectId: {project_id_esc}
+    }};
+    firebase.initializeApp(firebaseConfig);
+    const auth = firebase.auth();
+    const provider = new firebase.auth.GoogleAuthProvider();
+    document.getElementById("googleBtn").onclick = function() {{
+      document.getElementById("status").textContent = "Přesměrování na Google...";
+      auth.signInWithPopup(provider).then(function(result) {{
+        const user = result.user;
+        const email = user.email || "";
+        const name = user.displayName || "";
+        const photo = user.photoURL || "";
+        const params = new URLSearchParams({{
+          firebase_email: email,
+          firebase_name: name,
+          firebase_photo: photo
+        }});
+        const sep = redirectUri.indexOf("?") >= 0 ? "&" : "?";
+        window.top.location.href = redirectUri + sep + params.toString();
+      }}).catch(function(err) {{
+        document.getElementById("status").textContent = "Chyba: " + (err.message || err.code || "neznámá");
+      }});
+    }};
+  </script>
+</body>
+</html>
+"""
+
+
+def google_login():
     firebase = _get_firebase_secrets()
-    creds_path = _SCRIPT_DIR / "google_credentials.json"
-    try:
-        if hasattr(st, "secrets") and st.secrets.get("GOOGLE_CREDENTIALS_PATH"):
-            creds_path = Path(st.secrets["GOOGLE_CREDENTIALS_PATH"])
-            if not creds_path.is_absolute():
-                creds_path = _SCRIPT_DIR / creds_path
-    except Exception:
-        pass
-    redirect_uri = firebase.get("redirect_uri") or os.environ.get("GOOGLE_REDIRECT_URI") or "http://localhost:8501"
-    try:
-        if hasattr(st, "secrets") and st.secrets.get("GOOGLE_REDIRECT_URI"):
-            redirect_uri = st.secrets["GOOGLE_REDIRECT_URI"]
-    except Exception:
-        pass
-    cookie_name = firebase.get("cookie_name", "radseq_google_auth")
-    cookie_key = firebase.get("key") or firebase.get("cookie_key") or secrets.token_hex(16)
-    try:
-        if hasattr(st, "secrets") and st.secrets.get("GOOGLE_COOKIE_KEY"):
-            cookie_key = st.secrets["GOOGLE_COOKIE_KEY"]
-    except Exception:
-        pass
-    return GoogleAuthenticate(
-        secret_credentials_path=str(creds_path),
-        redirect_uri=redirect_uri,
-        cookie_name=cookie_name,
-        cookie_key=cookie_key,
-        cookie_expiry_days=30.0,
-    )
+    api_key = firebase.get("api_key", "")
+    auth_domain = firebase.get("auth_domain", "")
+    project_id = firebase.get("project_id", "")
+    redirect_uri = firebase.get("redirect_uri") or os.environ.get("STREAMLIT_APP_URL") or "http://localhost:8501"
+    if not api_key or not auth_domain or not project_id:
+        st.error("V .streamlit/secrets.toml chybí sekce [firebase] s api_key, auth_domain a project_id.")
+        return
+    html = _firebase_login_html(api_key, auth_domain, project_id, redirect_uri)
+    components.html(html, height=120)
 
 def _env_api_key(provider: str) -> str:
     if provider in ("Google Gemini", "Gemini 2.0 Flash"):
@@ -735,28 +768,23 @@ def main():
             pass
         st.session_state["_cache_cleared_at_start"] = True
     config = load_config()
-    google_auth = None
-    try:
-        google_auth = _get_google_authenticator()
-        google_auth.check_authentification()
-    except Exception as e:
-        if not st.session_state.get("connected"):
-            st.title("🧬 RAD-seq Asistent")
-            st.error("Google přihlášení není nakonfigurováno. Přidejte soubor google_credentials.json (OAuth 2.0 Client ID z GCP Console) do kořene projektu.")
-            st.code(str(e))
-            return
+    firebase_email = st.query_params.get("firebase_email")
+    firebase_name = st.query_params.get("firebase_name", "")
+    firebase_photo = st.query_params.get("firebase_photo", "")
+    if firebase_email:
+        st.session_state["connected"] = True
+        st.session_state["user_info"] = {
+            "email": firebase_email,
+            "name": firebase_name,
+            "picture": firebase_photo,
+        }
+        st.query_params.clear()
+        st.rerun()
     if not st.session_state.get("connected"):
         st.title("🧬 RAD-seq Asistent")
         st.success("Vítejte! Pro použití chatu se přihlaste pomocí Google účtu.")
         st.markdown("Přihlášení propojí vaši identitu s historií chatu v Cloudflare D1 (podle e-mailu).")
-        if google_auth:
-            try:
-                auth_url = google_auth.get_authorization_url()
-                st.link_button("🔐 Login with Google", url=auth_url, type="primary", use_container_width=True)
-                st.caption("Po kliknutí budete přesměrováni na Google. Po přihlášení se vrátíte sem.")
-            except Exception as e:
-                st.error("Chyba při zobrazení přihlášení. Zkontrolujte google_credentials.json a autorizované URI v GCP Console.")
-                st.code(str(e))
+        google_login()
         return
     user_info = st.session_state.get("user_info", {})
     name = user_info.get("name", "")
@@ -787,8 +815,7 @@ def main():
             st.image(photo_url, width=80)
         st.markdown(f"**{name or user_email}**")
         st.caption(user_email)
-        if st.button("🚪 Odhlásit se", key="google_logout", use_container_width=True) and google_auth:
-            google_auth.logout()
+        if st.button("🚪 Odhlásit se", key="google_logout", use_container_width=True):
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
             st.rerun()
