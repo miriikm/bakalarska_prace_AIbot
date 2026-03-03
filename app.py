@@ -107,11 +107,16 @@ def _get_google_authenticator():
         return None
 
 
+def _get_google_redirect_uri():
+    firebase = _get_firebase_secrets()
+    return (firebase.get("redirect_uri") or os.environ.get("STREAMLIT_APP_URL") or (st.secrets.get("REDIRECT_URI") if hasattr(st, "secrets") else "") or "http://localhost:8501").strip()
+
+
 def _google_oauth_creds_path():
     firebase = _get_firebase_secrets()
     client_id = (firebase.get("client_id") or os.environ.get("FIREBASE_CLIENT_ID") or "").strip()
     client_secret = (firebase.get("client_secret") or os.environ.get("FIREBASE_CLIENT_SECRET") or "").strip()
-    redirect_uri = (firebase.get("redirect_uri") or os.environ.get("STREAMLIT_APP_URL") or "http://localhost:8501").strip()
+    redirect_uri = _get_google_redirect_uri()
     if not client_id or not client_secret:
         return None, None
     creds = {
@@ -864,6 +869,20 @@ def main():
     if not st.session_state.get("connected"):
         st.title("🧬 RAD-seq Asistent")
         st.success("Vítejte! Pro použití chatu se přihlaste pomocí Google účtu.")
+        redirect_uri_used = _get_google_redirect_uri()
+        if redirect_uri_used.startswith("http://localhost"):
+            try:
+                st.warning("Používáte redirect_uri pro localhost. Na webu (Streamlit Cloud) přidejte do Secrets pod [firebase] položku **redirect_uri** s URL vaší aplikace (např. `https://vase-app.streamlit.app/`) a stejnou URL v GCP Console → Credentials → OAuth 2.0 Client ID → Authorized redirect URIs.")
+            except Exception:
+                pass
+        with st.expander("Proč vidím 403 od Google?"):
+            st.markdown("""
+1. **Test users** – V GCP: APIs & Services → OAuth consent screen → Test users → přidejte **přesně ten Google účet**, kterým se přihlašujete. V režimu Testing smí přihlášení jen tyto účty (403 = účet není v seznamu).
+2. **Redirect URI** – V GCP: Credentials → váš OAuth 2.0 Client ID (Web) → v **Authorized redirect URIs** musí být **přesně** stejná URL jako „Použitý redirect_uri“ níže. Zkuste s lomítkem i bez (`https://xxx.streamlit.app` a `https://xxx.streamlit.app/`).
+3. **V Secrets na webu** – V nastavení aplikace → Secrets přidejte pod `[firebase]` řádek: `redirect_uri = "https://vase-app.streamlit.app/"` (vaše skutečná URL).
+4. **403 hned po otevření** – Pokud 403 vidíte dřív, než kliknete na Google, jde o Streamlit: v nastavení aplikace na Streamlit Cloud zkontrolujte, že je aplikace veřejná.
+            """)
+            st.code(f"Použitý redirect_uri: {redirect_uri_used}", language=None)
         login_url = _google_oauth_login_url()
         if login_url:
             st.markdown(
