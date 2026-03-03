@@ -13,6 +13,8 @@ from database import get_chat_history, save_chat_to_db
 
 from dotenv import load_dotenv
 from streamlit_google_auth import Authenticate  # type: ignore[import-untyped]
+import google_auth_oauthlib.flow  # type: ignore[import-untyped]
+from googleapiclient.discovery import build
 
 import streamlit_authenticator as stauth
 
@@ -58,8 +60,11 @@ def _get_firebase_config():
 
 def _get_firebase_secrets():
     try:
-        if hasattr(st, "secrets") and isinstance(st.secrets.get("firebase"), dict):
-            return st.secrets["firebase"]
+        if hasattr(st, "secrets") and st.secrets.get("firebase") is not None:
+            fb = st.secrets["firebase"]
+            if isinstance(fb, dict):
+                return fb
+            return dict(fb)
     except Exception:
         pass
     return {}
@@ -67,15 +72,17 @@ def _get_firebase_secrets():
 
 def _get_google_authenticator():
     firebase = _get_firebase_secrets()
-    client_id = firebase.get("client_id", "")
-    client_secret = firebase.get("client_secret", "")
-    redirect_uri = firebase.get("redirect_uri") or "http://localhost:8501"
+    client_id = (firebase.get("client_id") or os.environ.get("FIREBASE_CLIENT_ID") or (st.secrets.get("FIREBASE_CLIENT_ID") if hasattr(st, "secrets") else "") or "").strip()
+    client_secret = (firebase.get("client_secret") or os.environ.get("FIREBASE_CLIENT_SECRET") or (st.secrets.get("FIREBASE_CLIENT_SECRET") if hasattr(st, "secrets") else "") or "").strip()
+    redirect_uri = (firebase.get("redirect_uri") or os.environ.get("STREAMLIT_APP_URL") or (st.secrets.get("REDIRECT_URI") if hasattr(st, "secrets") else "") or "http://localhost:8501").strip()
     if not client_id or not client_secret:
         return None
     creds = {
         "web": {
             "client_id": client_id,
             "client_secret": client_secret,
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
             "redirect_uris": [redirect_uri],
         }
     }
@@ -98,6 +105,98 @@ def _get_google_authenticator():
         except Exception:
             pass
         return None
+
+
+def _google_oauth_creds_path():
+    firebase = _get_firebase_secrets()
+    client_id = (firebase.get("client_id") or os.environ.get("FIREBASE_CLIENT_ID") or "").strip()
+    client_secret = (firebase.get("client_secret") or os.environ.get("FIREBASE_CLIENT_SECRET") or "").strip()
+    redirect_uri = (firebase.get("redirect_uri") or os.environ.get("STREAMLIT_APP_URL") or "http://localhost:8501").strip()
+    if not client_id or not client_secret:
+        return None, None
+    creds = {
+        "web": {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "redirect_uris": [redirect_uri],
+        }
+    }
+    import tempfile
+    fd, path = tempfile.mkstemp(suffix=".json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(creds, f)
+        return path, redirect_uri
+    except Exception:
+        try:
+            os.unlink(path)
+        except Exception:
+            pass
+        return None, None
+
+
+_GOOGLE_OAUTH_SCOPES = ["openid", "https://www.googleapis.com/auth/userinfo.profile", "https://www.googleapis.com/auth/userinfo.email"]
+
+
+def _google_oauth_check_and_login():
+    if st.session_state.get("connected"):
+        return
+    auth_code = st.query_params.get("code")
+    if not auth_code:
+        return
+    st.query_params.clear()
+    creds_path, redirect_uri = _google_oauth_creds_path()
+    if not creds_path:
+        st.error("Nepodařilo se načíst Google OAuth konfiguraci.")
+        return
+    try:
+        flow = google_auth_oauthlib.flow.Flow.from_client_secrets_file(
+            creds_path,
+            _GOOGLE_OAUTH_SCOPES,
+            redirect_uri=redirect_uri,
+            autogenerate_code_verifier=False,
+        )
+        flow.fetch_token(code=auth_code)
+        credentials = flow.credentials
+        user_info_service = build(serviceName="oauth2", version="v2", credentials=credentials)
+        user_info = user_info_service.userinfo().get().execute()
+        st.session_state["connected"] = True
+        st.session_state["oauth_id"] = user_info.get("id")
+        st.session_state["user_info"] = user_info
+        st.rerun()
+    except Exception:
+        st.error("Přihlášení přes Google selhalo. Zkuste to prosím znovu.")
+    finally:
+        try:
+            os.unlink(creds_path)
+        except Exception:
+            pass
+
+
+def _google_oauth_login_url():
+    creds_path, redirect_uri = _google_oauth_creds_path()
+    if not creds_path:
+        return None
+    try:
+        flow = google_auth_oauthlib.flow.Flow.from_client_secrets_file(
+            creds_path,
+            _GOOGLE_OAUTH_SCOPES,
+            redirect_uri=redirect_uri,
+            autogenerate_code_verifier=False,
+        )
+        authorization_url, _ = flow.authorization_url(access_type="offline", include_granted_scopes="true")
+        return authorization_url
+    except Exception:
+        return None
+    finally:
+        try:
+            if creds_path:
+                os.unlink(creds_path)
+        except Exception:
+            pass
+
 
 def _env_api_key(provider: str) -> str:
     if provider in ("Google Gemini", "Gemini 2.0 Flash"):
@@ -761,16 +860,18 @@ def main():
             pass
         st.session_state["_cache_cleared_at_start"] = True
     config = load_config()
-    authenticator = _get_google_authenticator()
-    if authenticator:
-        authenticator.check_authentification()
+    _google_oauth_check_and_login()
     if not st.session_state.get("connected"):
         st.title("🧬 RAD-seq Asistent")
         st.success("Vítejte! Pro použití chatu se přihlaste pomocí Google účtu.")
-        if authenticator:
-            authenticator.login()
+        login_url = _google_oauth_login_url()
+        if login_url:
+            st.markdown(
+                f'<div style="display: flex; justify-content: center;"><a href="{login_url}" target="_self" style="background-color: #4285f4; color: #fff; text-decoration: none; text-align: center; font-size: 16px; margin: 4px 2px; cursor: pointer; padding: 8px 12px; border-radius: 4px; display: flex; align-items: center;"><img src="https://lh3.googleusercontent.com/COxitqgJr1sJnIDe8-jiKhxDx1FrYbtRHKJ9z_hELisAlapwE9LUPh6fcXIfb5vwpbMl4xl9H9TRFPc5NOO8Sb3VSgIBrfRYvW6cUA" alt="Google logo" style="margin-right: 8px; width: 26px; height: 26px; background-color: white; border: 2px solid white; border-radius: 4px;">Sign in with Google</a></div>',
+                unsafe_allow_html=True,
+            )
         else:
-            st.error("V .streamlit/secrets.toml nastavte [firebase] s client_id a client_secret (OAuth 2.0 z GCP Console).")
+            st.error("Google přihlášení vyžaduje client_id a client_secret. Lokálně: v .streamlit/secrets.toml přidej pod [firebase] položky client_id a client_secret. Na webu (Streamlit Cloud): v nastavení aplikace → Secrets vlož TOML s [firebase], client_id a client_secret z GCP Console (OAuth 2.0 Client ID).")
         return
     user_info = st.session_state.get("user_info", {})
     user_email = user_info.get("email", "") or ""
@@ -801,8 +902,7 @@ def main():
             st.image(photo_url, width=80)
         st.markdown(f"**{name or user_email}**")
         st.caption(user_email)
-        if st.button("🚪 Odhlásit se", key="google_logout", use_container_width=True) and authenticator:
-            authenticator.logout()
+        if st.button("🚪 Odhlásit se", key="google_logout", use_container_width=True):
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
             st.rerun()
