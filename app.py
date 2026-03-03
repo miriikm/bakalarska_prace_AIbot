@@ -1126,11 +1126,12 @@ def main():
             with st.chat_message("assistant"):
                 st.markdown(_format_citations(content))
     
-    uploaded_file = st.file_uploader("Vlož obrázek pro analýzu (graf, schéma...)", type=["png", "jpg", "jpeg"])
-    if uploaded_file:
-        st.session_state["_pending_image_bytes"] = uploaded_file.getvalue()
-        st.session_state["_pending_image_type"] = uploaded_file.type or "image/jpeg"
-        st.image(uploaded_file, caption="Nahraný obrázek", use_container_width=True)
+    with st.expander("🖼️ Vložit obrázek pro analýzu", expanded=False):
+        uploaded_file = st.file_uploader("Graf, schéma... (png, jpg, jpeg)", type=["png", "jpg", "jpeg"])
+        if uploaded_file:
+            st.session_state["_pending_image_bytes"] = uploaded_file.getvalue()
+            st.session_state["_pending_image_type"] = uploaded_file.type or "image/jpeg"
+            st.image(uploaded_file, caption="Nahraný obrázek", use_container_width=True)
     
     if prompt := st.chat_input("Zadejte svůj dotaz (např. filtrování VCF nebo demultiplexing):"):
         user_key = st.session_state.get("api_key_input", "") or stored_api_key
