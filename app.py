@@ -88,10 +88,13 @@ def get_github_model_response(prompt, context):
         base_url="https://models.inference.ai.azure.com",
         api_key=st.secrets["GITHUB_TOKEN"],
     )
+    sys = "Jsi vědecký asistent. Při odpovídání rozlišuj původ informací: pokud informaci čerpáš z poskytnutého kontextu (manuálu), vlož za větu nebo odstavec značku [MANUAL]; pokud ze svých znalostí, vlož [AI]. Příklad: PCA analýza slouží k vizualizaci genetických struktur [MANUAL]. Je to jedna z nejpoužívanějších metod v bioinformatice [AI]."
+    if not (context or "").strip():
+        sys += " Nemáš k dispozici kontext z manuálu, označuj vše jako [AI]."
     full_prompt = f"Kontext z manuálů: {context}\n\nOtázka: {prompt}"
     response = client.chat.completions.create(
         messages=[
-            {"role": "system", "content": "Jsi odborník na populační genetiku. Pokud ti poskytnu kontext z manuálu, striktně se ho drž. Pokud v kontextu odpověď není, jasně to uveď a až poté odpověz ze svých znalostí."},
+            {"role": "system", "content": sys},
             {"role": "user", "content": full_prompt}
         ],
         model="gpt-4o",
@@ -540,15 +543,23 @@ def generate_conversation_title(first_question: str, api_key: str, provider: str
     words = first_question.strip().split()[:5]
     return " ".join(words) if words else f"Konverzace {datetime.now().strftime('%d.%m')}"
 
-PROMPT_TEMPLATE = """Jsi expert na Speciation Genomics. Odpovídáš na základě oficiálního manuálu ze speciationgenomics.github.io.
-Pokud ti poskytnu kontext z manuálu, striktně se ho drž. Pokud v kontextu odpověď není, jasně to uveď a až poté odpověz ze svých znalostí.
+def _format_citations(text: str) -> str:
+    if not text:
+        return text
+    return text.replace("[MANUAL]", " 📖").replace("[AI]", " 🤖")
+
+PROMPT_TEMPLATE = """Jsi vědecký asistent. Při odpovídání rozlišuj původ informací:
+- Pokud informaci čerpáš z poskytnutého kontextu (manuálu), vlož za danou větu nebo odstavec značku [MANUAL].
+- Pokud informaci doplňuješ ze svých obecných znalostí, vlož značku [AI].
+Příklad: PCA analýza slouží k vizualizaci genetických struktur [MANUAL]. Je to jedna z nejpoužívanějších metod v bioinformatice [AI].
 
 KONTEXT Z MANUÁLU:
 {context}
 
 Otázka: {question}"""
 
-PROMPT_TEMPLATE_NO_CONTEXT = """Uživatel se ptá na: {question}. Pokud o tom v manuálu nic není, jasně to uveď a až poté odpověz ze svých obecných znalostí o genetice."""
+PROMPT_TEMPLATE_NO_CONTEXT = """Jsi vědecký asistent. Nemáš k dispozici kontext z manuálu, označuj vše jako [AI].
+Uživatel se ptá na: {question}. Odpověz ze svých obecných znalostí o genetice a u každé věty/odstavce použij [AI]."""
 
 def classify_user_intent(prompt: str, api_key: str, provider: str = "Google Gemini") -> str:
     greeting_keywords = ["ahoj", "čau", "dobrý den", "dobrý večer", "děkuji", "děkuju", "díky",
@@ -1103,7 +1114,7 @@ def main():
                 st.write(content)
         else:
             with st.chat_message("assistant"):
-                st.markdown(content)
+                st.markdown(_format_citations(content))
     
     # Vstupní pole pro novou otázku
     if prompt := st.chat_input("Zadejte svůj dotaz (např. filtrování VCF nebo demultiplexing):"):
@@ -1157,7 +1168,7 @@ def main():
                 context_text = ""
 
                 if intent == "greeting":
-                    full_prompt = prompt
+                    full_prompt = PROMPT_TEMPLATE_NO_CONTEXT.format(question=prompt)
                 else:
                     with st.spinner("Hledám v manuálech a připravuji odpověď..."):
                         vs = None
@@ -1171,9 +1182,9 @@ def main():
                             if reason:
                                 st.warning(f"⚠️ Vyhledávání v manuálu není k dispozici: {reason}")
                             if general_knowledge_fallback:
-                                full_prompt = prompt
+                                full_prompt = PROMPT_TEMPLATE_NO_CONTEXT.format(question=prompt)
                             else:
-                                full_prompt = prompt
+                                full_prompt = PROMPT_TEMPLATE_NO_CONTEXT.format(question=prompt)
                         else:
                             try:
                                 retriever = vs.as_retriever(search_kwargs={"k": 5})
@@ -1190,7 +1201,7 @@ def main():
                             if context_text is None or not str(context_text).strip():
                                 general_knowledge_fallback = True
                             if general_knowledge_fallback or not context_text or not str(context_text).strip():
-                                full_prompt = prompt
+                                full_prompt = PROMPT_TEMPLATE_NO_CONTEXT.format(question=prompt)
                             else:
                                 full_prompt = PROMPT_TEMPLATE.format(context=context_text, question=prompt)
 
@@ -1225,9 +1236,11 @@ def main():
                     st.error("Model nevrátil žádnou odpověď. Zkuste to prosím znovu.")
                     st.session_state["messages"].pop()
                     st.stop()
-                if not streamed:
-                    st.markdown(response_content)
                 _ctx_len = st.session_state.get("_last_context_length", 0)
+                if not _ctx_len:
+                    response_content = response_content.replace("[MANUAL]", "[AI]")
+                if not streamed:
+                    st.markdown(_format_citations(response_content))
                 if _ctx_len and _ctx_len > 0:
                     st.info("📚 Odpověď sestavena na základě manuálu speciationgenomics.github.io")
                 else:
