@@ -23,6 +23,7 @@ history.json
 
 # Konfigurace s citlivými údaji
 config.yaml
+.env
 
 # IDE
 .vscode/

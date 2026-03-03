@@ -7,6 +7,9 @@ import secrets
 from datetime import datetime
 from pathlib import Path
 from pydantic import SecretStr
+from database import get_user_session, save_user_session
+
+from dotenv import load_dotenv
 
 import streamlit_authenticator as stauth
 
@@ -22,6 +25,7 @@ os.environ["GOOGLE_API_VERSION"] = "v1"
 
 # --- KONFIGURACE ---
 _SCRIPT_DIR = Path(__file__).resolve().parent
+load_dotenv(_SCRIPT_DIR / ".env")
 DOCS_DIR = _SCRIPT_DIR / "docs"
 DOCS_DIR.mkdir(exist_ok=True)
 FAISS_INDEX_STATIC = _SCRIPT_DIR / "faiss_index_static"
@@ -29,7 +33,17 @@ FAISS_INDEX_DIR = _SCRIPT_DIR / "faiss_index_local"
 HISTORY_FILE = _SCRIPT_DIR / "history.json"
 CONFIG_FILE = _SCRIPT_DIR / "config.yaml"
 
+def _env_api_key(provider: str) -> str:
+    if provider == "Google Gemini":
+        return (os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY") or "").strip()
+    if provider == "OpenAI (ChatGPT)":
+        return (os.environ.get("OPENAI_API_KEY") or "").strip()
+    return ""
+
 def _get_global_api_key(provider: str) -> str:
+    from_env = _env_api_key(provider)
+    if from_env:
+        return from_env
     try:
         if hasattr(st, "secrets"):
             if provider == "Google Gemini":
@@ -41,12 +55,15 @@ def _get_global_api_key(provider: str) -> str:
     return ""
 
 def _get_default_gemini_api_key() -> str:
+    from_env = (os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY") or os.environ.get("RADSEQ_DEFAULT_GEMINI_API_KEY") or "").strip()
+    if from_env:
+        return from_env
     try:
         if hasattr(st, "secrets") and st.secrets.get("gemini_api_key"):
             return str(st.secrets["gemini_api_key"]).strip()
     except Exception:
         pass
-    return (os.environ.get("RADSEQ_DEFAULT_GEMINI_API_KEY") or "").strip()
+    return ""
 
 def _resolve_api_key(provider: str, user_key: str) -> tuple[str, bool]:
     global_key = _get_global_api_key(provider)
@@ -683,7 +700,7 @@ def main():
         if not _eff:
             st.caption("API klíč: nezadán")
         else:
-            st.caption("API klíč: z Nastavení" if not _from_secrets else "API klíč: z secrets/prostředí")
+            st.caption("API klíč: z Nastavení" if not _from_secrets else ("API klíč: z .env" if (_eff and _env_api_key(current_provider) == _eff) else "API klíč: z secrets/prostředí"))
         st.divider()
         
         # Tlačítko "Nová konverzace"
@@ -1026,7 +1043,6 @@ def main():
         ai_provider = st.session_state.get("ai_provider", stored_provider)
         api_key, _using_global_key = _resolve_api_key(ai_provider, user_key)
     
-    # Hlavní chat rozhraní
     st.title("🧬 RAD-seq Asistent (Lokalizované vyhledávání)")
     if st.session_state.get("conversation_title"):
         st.caption(f"📝 {st.session_state['conversation_title']}")
@@ -1035,7 +1051,14 @@ def main():
     provider_text = "Gemini" if ai_provider == "Google Gemini" else "ChatGPT"
     st.info(f"Vyhledávání v manuálech probíhá lokálně (bez limitů). {provider_text} se používá pouze pro generování textu.")
     
-    # Zobrazení historie zpráv
+    if not st.session_state["messages"]:
+        try:
+            remote_history = get_user_session(username)
+        except Exception:
+            remote_history = None
+        if isinstance(remote_history, list):
+            st.session_state["messages"] = remote_history
+
     for msg in st.session_state["messages"]:
         role = msg.get("role", "user")
         content = msg.get("content", "")
@@ -1061,12 +1084,10 @@ def main():
             st.warning("⚠️ Pro použití OpenAI (ChatGPT) musíte zadat platný OpenAI API klíč (začíná na 'sk-'). Zadejte ho v sekci 'Nastavení'.")
             st.stop()
         
-        # Přidáme uživatelskou zprávu
         st.session_state["messages"].append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.write(prompt)
         
-        # Pokud je to první zpráva v konverzaci, vytvoříme novou konverzaci a vygenerujeme název
         is_new_conversation = st.session_state["current_conversation_id"] is None
         if is_new_conversation:
             st.session_state["current_conversation_id"] = secrets.token_hex(4)
@@ -1075,7 +1096,6 @@ def main():
             except Exception:
                 st.session_state["conversation_title"] = f"Konverzace {datetime.now().strftime('%d.%m')}"
         
-        # Generování odpovědi
         with st.chat_message("assistant"):
             try:
                 intent = classify_user_intent(prompt, api_key, ai_provider)
@@ -1159,11 +1179,8 @@ def main():
                 if not streamed:
                     st.markdown(response_content)
                 
-                # Přidáme odpověď do zpráv
                 st.session_state["messages"].append({"role": "assistant", "content": response_content})
                 
-                # AUTOMATICKÉ UKLÁDÁNÍ: Uložíme konverzaci do historie po každé odpovědi
-                # CHYTRÁ AKTUALIZACE: Pokud existuje stejné ID, aktualizujeme existující záznam
                 timestamp = datetime.now().isoformat()
                 save_history(
                     username,
@@ -1172,6 +1189,10 @@ def main():
                     st.session_state["messages"],
                     timestamp
                 )
+                try:
+                    save_user_session(username, st.session_state["messages"])
+                except Exception:
+                    pass
                 
                 # Zobrazíme zdroje pouze pokud byly použity (technický dotaz s RAG)
                 if intent == "technical" and relevant_docs and len(relevant_docs) > 0:

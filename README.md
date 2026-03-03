@@ -132,6 +132,15 @@ Po prvním přihlášení do aplikace si můžete nastavit preferovaný AI model
 
 > **💡 Tip**: Můžete kdykoli přepnout mezi modely nebo změnit API klíč. Aktivní model je vždy zobrazen v horní části sidebaru.
 
+### API klíče z .env (volitelné)
+
+API klíče lze nastavit i přes soubor **`.env`** v kořeni projektu (není v gitu). Zkopírujte `env.example` na `.env` a doplňte hodnoty:
+
+- `GOOGLE_API_KEY` nebo `GEMINI_API_KEY` – pro Google Gemini
+- `OPENAI_API_KEY` – pro OpenAI (začíná na `sk-`)
+
+Priorita: klíč uložený v Nastavení (profil) → .env → Streamlit secrets / proměnné prostředí.
+
 ## Použití
 
 1. **Registrace/ Přihlášení**: Při prvním spuštění se zaregistrujte nebo přihlaste
@@ -155,6 +164,7 @@ Aby na hostingu fungovalo vyhledávání v manuálu (RAG), musí být v repozit�
 
 **Ignorované soubory:**
 - **`config.yaml`** - Uživatelské účty, API klíče (Google/OpenAI) a volba AI modelu
+- **`.env`** - API klíče načtené z prostředí (GOOGLE_API_KEY, OPENAI_API_KEY atd.)
 - **`history.json`** - Historie konverzací všech uživatelů
 - **`venv/`** - Virtuální prostředí Pythonu
 - **`docs/`** - Nahrané dokumenty a manuály

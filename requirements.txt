@@ -1,5 +1,6 @@
 streamlit
 streamlit-authenticator
+python-dotenv
 langchain
 langchain-community
 langchain-openai
@@ -11,3 +12,4 @@ faiss-cpu
 pypdf
 beautifulsoup4
 pyyaml
+requests
