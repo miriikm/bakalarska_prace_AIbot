@@ -855,13 +855,6 @@ def main():
             else:
                 st.info("Zatím žádné uložené konverzace.")
         
-        with st.expander("📊 Debug: kontext z manuálu", expanded=False):
-            _n = st.session_state.get("_last_context_length")
-            if _n is not None:
-                st.caption(f"Délka kontextu z manuálu (poslední odpověď): **{_n}** znaků")
-            else:
-                st.caption("Zatím žádná data (pošlete zprávu pro zobrazení).")
-        
         # SEKCE MANUÁLY - Expander se správou manuálů
         with st.expander("📚 Správa manuálů", expanded=False):
             uploaded_file = st.file_uploader(
