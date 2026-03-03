@@ -91,7 +91,7 @@ def get_github_model_response(prompt, context):
     full_prompt = f"Kontext z manuálů: {context}\n\nOtázka: {prompt}"
     response = client.chat.completions.create(
         messages=[
-            {"role": "system", "content": "Jsi odborník na populační genetiku."},
+            {"role": "system", "content": "Jsi odborník na populační genetiku. Pokud ti poskytnu kontext z manuálu, striktně se ho drž. Pokud v kontextu odpověď není, jasně to uveď a až poté odpověz ze svých znalostí."},
             {"role": "user", "content": full_prompt}
         ],
         model="gpt-4o",
@@ -541,15 +541,14 @@ def generate_conversation_title(first_question: str, api_key: str, provider: str
     return " ".join(words) if words else f"Konverzace {datetime.now().strftime('%d.%m')}"
 
 PROMPT_TEMPLATE = """Jsi expert na Speciation Genomics. Odpovídáš na základě oficiálního manuálu ze speciationgenomics.github.io.
+Pokud ti poskytnu kontext z manuálu, striktně se ho drž. Pokud v kontextu odpověď není, jasně to uveď a až poté odpověz ze svých znalostí.
 
 KONTEXT Z MANUÁLU:
 {context}
 
-Pokud v tomto manuálu odpověď není, upozorni na to uživatele.
-
 Otázka: {question}"""
 
-PROMPT_TEMPLATE_NO_CONTEXT = """Uživatel se ptá na: {question}. Pokud o tom v manuálu nic není, odpověz ze svých obecných znalostí o genetice, ale upozorni na to."""
+PROMPT_TEMPLATE_NO_CONTEXT = """Uživatel se ptá na: {question}. Pokud o tom v manuálu nic není, jasně to uveď a až poté odpověz ze svých obecných znalostí o genetice."""
 
 def classify_user_intent(prompt: str, api_key: str, provider: str = "Google Gemini") -> str:
     greeting_keywords = ["ahoj", "čau", "dobrý den", "dobrý večer", "děkuji", "děkuju", "díky",
@@ -844,6 +843,13 @@ def main():
                                 st.rerun()
             else:
                 st.info("Zatím žádné uložené konverzace.")
+        
+        with st.expander("📊 Debug: kontext z manuálu", expanded=False):
+            _n = st.session_state.get("_last_context_length")
+            if _n is not None:
+                st.caption(f"Délka kontextu z manuálu (poslední odpověď): **{_n}** znaků")
+            else:
+                st.caption("Zatím žádná data (pošlete zprávu pro zobrazení).")
         
         # SEKCE MANUÁLY - Expander se správou manuálů
         with st.expander("📚 Správa manuálů", expanded=False):
@@ -1189,6 +1195,7 @@ def main():
                                 full_prompt = PROMPT_TEMPLATE.format(context=context_text, question=prompt)
 
                 if intent != "greeting" and len(context_text) == 0:
+                    st.session_state["_last_context_length"] = 0
                     response_content = (
                         "**Znalostní báze není k dispozici.** Bez vyhledávacího indexu nemůžu odpovídat z manuálu.\n\n"
                         "**Lokálně:** V terminálu spusť `pip install sentence-transformers` a `python build_faiss_from_static.py`, pak obnov stránku.\n\n"
@@ -1196,6 +1203,7 @@ def main():
                     )
                     streamed = False
                 else:
+                    st.session_state["_last_context_length"] = len(context_text or "")
                     with st.spinner("Hledám v manuálech a připravuji odpověď..." if intent != "greeting" else "Přemýšlím..."):
                         if ai_provider == "GPT-4o (GitHub)":
                             try:
@@ -1219,7 +1227,11 @@ def main():
                     st.stop()
                 if not streamed:
                     st.markdown(response_content)
-                
+                _ctx_len = st.session_state.get("_last_context_length", 0)
+                if _ctx_len and _ctx_len > 0:
+                    st.info("📚 Odpověď sestavena na základě manuálu speciationgenomics.github.io")
+                else:
+                    st.warning("🤖 Odpověď generována z obecných znalostí modelu (v manuálu nenalezeno)")
                 st.session_state["messages"].append({"role": "assistant", "content": response_content})
                 try:
                     save_chat_to_db(username, response_content, "assistant")
