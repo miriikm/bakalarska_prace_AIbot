@@ -38,6 +38,24 @@ FAISS_INDEX_DIR = _SCRIPT_DIR / "faiss_index_local"
 HISTORY_FILE = _SCRIPT_DIR / "history.json"
 CONFIG_FILE = _SCRIPT_DIR / "config.yaml"
 
+
+def _get_firebase_config():
+    try:
+        if hasattr(st, "secrets") and isinstance(st.secrets.get("firebase"), dict):
+            fb = st.secrets["firebase"]
+            return {
+                "apiKey": fb.get("api_key", ""),
+                "authDomain": fb.get("auth_domain", ""),
+                "projectId": fb.get("project_id", ""),
+                "storageBucket": fb.get("storage_bucket", ""),
+                "messagingSenderId": fb.get("messaging_sender_id", ""),
+                "appId": fb.get("app_id", ""),
+            }
+    except Exception:
+        pass
+    return {}
+
+
 def _get_firebase_secrets():
     try:
         if hasattr(st, "secrets") and isinstance(st.secrets.get("firebase"), dict):
@@ -97,11 +115,13 @@ def _get_global_api_key(provider: str) -> str:
     try:
         if hasattr(st, "secrets"):
             if provider in ("Google Gemini", "Gemini 2.0 Flash"):
-                return (st.secrets.get("GOOGLE_API_KEY") or st.secrets.get("gemini_api_key") or "").strip()
+                key = (st.secrets.get("google") or {}).get("api_key", "") or st.secrets.get("GOOGLE_API_KEY") or st.secrets.get("gemini_api_key")
+                return (key or "").strip()
             if provider == "OpenAI (ChatGPT)":
-                return (st.secrets.get("OPENAI_API_KEY") or "").strip()
+                return ((st.secrets.get("OPENAI_API_KEY") or "").strip())
             if provider == "GPT-4o (GitHub)":
-                return (st.secrets.get("GITHUB_TOKEN") or "").strip()
+                token = (st.secrets.get("github") or {}).get("token", "") or st.secrets.get("GITHUB_TOKEN")
+                return (token or "").strip()
     except Exception:
         pass
     return ""
@@ -111,8 +131,10 @@ def _get_default_gemini_api_key() -> str:
     if from_env:
         return from_env
     try:
-        if hasattr(st, "secrets") and st.secrets.get("gemini_api_key"):
-            return str(st.secrets["gemini_api_key"]).strip()
+        if hasattr(st, "secrets"):
+            key = (st.secrets.get("google") or {}).get("api_key", "") or st.secrets.get("gemini_api_key")
+            if key:
+                return str(key).strip()
     except Exception:
         pass
     return ""
@@ -131,9 +153,10 @@ def _resolve_api_key(provider: str, user_key: str) -> tuple[str, bool]:
 
 
 def get_github_model_response(prompt, context, image_bytes: bytes | None = None, image_type: str = "image/jpeg"):
+    github_token = (st.secrets.get("github") or {}).get("token", "") or st.secrets.get("GITHUB_TOKEN", "")
     client = OpenAI(
         base_url="https://models.inference.ai.azure.com",
-        api_key=st.secrets["GITHUB_TOKEN"],
+        api_key=github_token,
     )
     sys = "Jsi vědecký asistent. Při odpovídání rozlišuj původ informací: pokud informaci čerpáš z poskytnutého kontextu (manuálu), vlož za větu nebo odstavec značku [MANUAL]; pokud ze svých znalostí, vlož [AI]. Příklad: PCA analýza slouží k vizualizaci genetických struktur [MANUAL]. Je to jedna z nejpoužívanějších metod v bioinformatice [AI]. Pokud uživatel nahraje obrázek, propoj informace z něj s manuály speciationgenomics. Pokud jde o graf (např. PCA nebo Admixture), popiš, co v něm vidíš."
     if not (context or "").strip():
